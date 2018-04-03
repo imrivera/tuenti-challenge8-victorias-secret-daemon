@@ -24,31 +24,15 @@
   code_change/3]).
 
 
--define(KEYS, [
-  16#08,
-  16#06,
-  16#0B,
-  16#12,
-  16#2C,
-  16#0F,
-  16#08,
-  16#17,
-  16#16,
-  16#2C,
-  16#13,
-  16#0F,
-  16#04,
-  16#1C,
-  16#2C,
-  16#04,
-  16#2C,
-  16#0A,
-  16#04,
-  16#10,
-  16#08,
-  16#28,
-  16#00
-]).
+-export([send_keys/2,
+         fix_caps_lock/2,
+         wait_for_empty_buffer/1,
+         set_caps_lock/2,
+         send_caps_lock_messages/2]).
+
+
+-define(HIGH_PRIORITY, 0).
+-define(NORMAL_PRIORITY, 1).
 
 
 -define(SERVER, ?MODULE).
@@ -81,11 +65,20 @@
 -define(DEVICE_BNUM_INTERFACES, 16#00).
 
 
-
+-define(INPUT_DATA_SIZE, 10).
 -define(HID_REPORT, <<16#05, 16#01, 16#09, 16#06, 16#a1, 16#01, 16#05, 16#07, 16#19, 16#e0, 16#29, 16#e7, 16#15, 16#00, 16#25, 16#01,
   16#75, 16#01, 16#95, 16#08, 16#81, 16#02, 16#95, 16#01, 16#75, 16#08, 16#81, 16#01, 16#95, 16#03, 16#75, 16#01,
   16#05, 16#08, 16#19, 16#01, 16#29, 16#03, 16#91, 16#02, 16#95, 16#01, 16#75, 16#05, 16#91, 16#01, 16#95, 16#06,
   16#75, 16#08, 16#15, 16#00, 16#26, 16#ff, 16#00, 16#05, 16#07, 16#19, 16#00, 16#2a, 16#ff, 16#00, 16#81, 16#00,
+  16#95, 16#01, 16#75, 16#01, 16#05, 16#01, 16#09, 16#81, 16#81, 16#02, % Power Down  1-bit
+  16#95, 16#01, 16#75, 16#01, 16#05, 16#01, 16#09, 16#82, 16#81, 16#02, % Sleep 1-bit
+  16#95, 16#01, 16#75, 16#06, 16#81, 16#01,  % 6-bit padding
+
+  15#01, 25#01, 16#0B, 16#96, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#60,
+  %16#95, 16#01, 16#75, 16#01, 16#05, 16#0C, 16#0B, 16#92, 16#01, 16#00, 16#81, 16#02,
+  16#95, 16#01, 16#75, 16#07, 16#81, 16#01,
+
+
   16#c0>>).
 
 -define(URB_VENDOR, <<"Dell"/utf16-little>>).
@@ -94,10 +87,15 @@
 -record(state, {socket :: gen_tcp:socket(),
                 pending_data = <<>> :: binary(),
                 step :: undefined | imported,
-                sequence = undefined :: non_neg_integer() | undefined,
-                keys = ?KEYS :: list(),
-                first_submit = true,
-                timer_for_set = undefined :: reference() | undefined}).
+                submit_sequence = undefined :: non_neg_integer() | undefined,
+                timer_for_set = undefined :: reference() | undefined,
+                pending_keys :: pqueue2:pqueue2(),
+                ready_for_keys = false :: boolean(),
+                caps_lock_fix = false :: boolean(),
+                caps_lock_enabled = false :: boolean(),
+                fsm_pid = undefined :: undefined | pid(),
+                from_wait_for_empty_buffer = undefined,
+                send_caps_lock_messages = false :: boolean()}).
 
 %%%===================================================================
 %%% API
@@ -120,6 +118,24 @@ debug() ->
   dbg:tpl(gen_tcp, send, x),
   dbg:p(all, [c]).
 
+
+send_keys(SrvRef, Keys) ->
+    gen_server:call(SrvRef, {send_keys, Keys, ?NORMAL_PRIORITY}).
+
+fix_caps_lock(SrvRef, Value) ->
+    gen_server:call(SrvRef, {fix_caps_lock, Value == true}).
+
+-spec set_caps_lock(pid(), on | off) -> ok.
+set_caps_lock(SrvRef, Value) ->
+    gen_server:call(SrvRef, {set_caps_lock, Value}).
+
+wait_for_empty_buffer(SrvRef) ->
+    gen_server:call(SrvRef, wait_for_empty_buffer, 30000).
+
+send_caps_lock_messages(SrvRef, SendEnabled) ->
+    gen_server:call(SrvRef, {send_caps_lock_messages, SendEnabled}).
+
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -139,7 +155,8 @@ debug() ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([Socket]) ->
-  {ok, #state{socket = Socket, pending_data = <<>>, step = undefined}}.
+    io:format("I'M ~p~n", [self()]),
+  {ok, #state{socket = Socket, pending_data = <<>>, step = undefined, pending_keys = pqueue2:new()}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -156,6 +173,42 @@ init([Socket]) ->
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
   {stop, Reason :: term(), NewState :: #state{}}).
+handle_call({send_keys, Keys, Priority}, _From, #state{pending_keys = PendingKeys} = State) ->
+    Keys2 = filter_keys(lists:flatten(Keys)),
+    % We can't send keys right now, enqueue them
+    NewPendingKeys = lists:foldl(fun(Key, Queue) -> pqueue2:in(Key, Priority, Queue) end, PendingKeys, Keys2),
+    State2 = State#state{pending_keys = NewPendingKeys},
+
+    State3 = case State2#state.ready_for_keys of
+                false ->
+                    State2;
+                true ->
+                    check_and_send_key(State2)
+             end,
+    {reply, ok, State3};
+handle_call({fix_caps_lock, Value}, _From, #state{caps_lock_enabled = true} = State) ->
+    {reply, ok, State#state{caps_lock_fix = Value}};
+handle_call({fix_caps_lock, true}, From, State) ->
+    % We want to enable caps_lock and we know it's disabled
+    handle_call({send_keys, [caps_lock, none], ?HIGH_PRIORITY}, From, State#state{caps_lock_fix = true});
+handle_call(wait_for_empty_buffer, From, #state{pending_keys = PendingKeys} = State) ->
+    case pqueue2:is_empty(PendingKeys) of
+        true ->
+            {reply, ok, State};
+        false ->
+            {noreply, State#state{from_wait_for_empty_buffer = From}}
+    end;
+handle_call({set_caps_lock, Value}, From, #state{caps_lock_enabled = IsCapsLockEnabled} = State) ->
+    BoolValue = Value == on,
+    case IsCapsLockEnabled == BoolValue of
+        true ->
+            % Already in required state
+            {reply, ok, State#state{caps_lock_fix = false}};
+        false ->
+            handle_call({send_keys, [caps_lock, none], ?HIGH_PRIORITY}, From, State#state{caps_lock_fix = false})
+    end;
+handle_call({send_caps_lock_messages, SendEnabled}, _From, State) ->
+    {reply, ok, State#state{send_caps_lock_messages = SendEnabled}};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
@@ -200,40 +253,14 @@ handle_info({tcp, Socket, Data}, #state{pending_data = PendingData} = State) ->
     {error, Reason} ->
       {stop, Reason, StateWithFullBuffer}
   end;
-handle_info(next_key_timeout, State) ->
-  self() ! next_key,
-  {noreply, State#state{timer_for_set = undefined}};
-handle_info(next_key, #state{sequence = SequenceNumber, socket = Socket, keys = Keys} = State) ->
-
-  KeysToUse = case Keys of
-                [] ->
-                  [];
-                  % ?KEYS;
-                _ ->
-                  Keys
-              end,
-
-  case KeysToUse of
-    [] ->
-      {noreply, State#state{keys = KeysToUse, sequence = undefined}};
-    _ ->
-      FirstKey = hd(KeysToUse),
-      Data = <<0, 0, FirstKey, 0, 0, 0, 0, 0>>,
-      RespPrefix = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
-        <<SequenceNumber:32/big>>,
-        <<0:16/big, 0:16/big>>,   % Devid
-        <<0:32/big>>,    % Direction
-        <<0:32/big>>,    % Endpoint
-        <<0:32/big>>,    % Status success
-        <<8:32/big>>,
-        <<16#FFFFFFFF:32/unsigned-big>>,    % ISO start frame
-        <<0:32/big>>,    % Number of ISO descriptors
-        <<0:32/big>>,    % ISO error count
-        <<0:64/big>>     % Setup data
-      ],
-      gen_tcp:send(Socket, [RespPrefix, Data]),
-      {noreply, State#state{keys = tl(KeysToUse), sequence = undefined}}
-  end;
+handle_info(waiting_for_set_configuration_timeout, #state{timer_for_set = undefined} = State) ->
+    % This message arrived too late, SET REPORT already handled this case, just ignore it
+    {noreply, State};
+handle_info(waiting_for_set_configuration_timeout, State) ->
+    io:format("## READY (TIMEOUT)~n"),
+    NewState = check_and_send_key(State),
+    {ok, FsmPid} = sp_fsm:start_link(self(), State#state.caps_lock_enabled),
+    {noreply, NewState#state{timer_for_set = undefined, fsm_pid = FsmPid}};
 
 handle_info({tcp_closed, _}, State) ->
   % Connection closed
@@ -373,30 +400,33 @@ handle_cmd_submit(<<SequenceNumber:32/big, ?DEVICE_BUS_NUMBER:16/big, ?DEVICE_NU
           1 -> get;
           0 -> set
   end,
-
   handle_urb(Op, RestBinary, SequenceNumber, Socket, State);
 
-handle_cmd_submit(<<SequenceNumber:32/big, ?DEVICE_BUS_NUMBER:16/big, ?DEVICE_NUMBER:16/big,
-  1:32/big,  % Direction
-  1:32/big,  % Endpoint
-  _:32/big, % Transfer flags
-  _TransferBufferLength:32/big,
-  _:32/big, % ISO start frame
-  _:32/big, % Number of ISO descriptors
-  _:32/big, % Interval
-  _:64/big,
-  RestBinary/binary>>, Socket, #state{first_submit = IsFirstSubmit} = State) ->
+handle_cmd_submit(<<SequenceNumber:32/big,
+                    ?DEVICE_BUS_NUMBER:16/big,
+                    ?DEVICE_NUMBER:16/big,
+                    1:32/big,  % Direction
+                    1:32/big,  % Endpoint
+                    _:32/big, % Transfer flags
+                    _TransferBufferLength:32/big,
+                    _:32/big, % ISO start frame
+                    _:32/big, % Number of ISO descriptors
+                    _:32/big, % Interval
+                    _:64/big,
+                    RestBinary/binary>>,
+                    Socket,
+                    #state{submit_sequence = OldSubmitSequence} = State) ->
 
-  TimeRef = case IsFirstSubmit of
-              true ->
-                erlang:send_after(1000, self(), next_key_timeout);
-              false ->
-                self() ! next_key,
-                undefined
-            end,
   io:format("## URB SUBMIT ~p~n", [SequenceNumber]),
-
-  handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, sequence = SequenceNumber, timer_for_set = TimeRef, first_submit = false});
+  case OldSubmitSequence == undefined of
+      true ->
+          % This is the first submit, we are not ready yet, wait for a SET CONFIGURATION or timeout
+          TimerRef = erlang:send_after(3000, self(), waiting_for_set_configuration_timeout),
+          handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, submit_sequence = SequenceNumber, timer_for_set = TimerRef});
+      false ->
+          NewState = check_and_send_key(State#state{submit_sequence = SequenceNumber}),
+          handle_command(RestBinary, Socket, NewState#state{pending_data = RestBinary})
+  end;
 handle_cmd_submit(_Binary, _, State) ->
   {ok, State}.
 
@@ -493,7 +523,7 @@ handle_urb(get, <<16#8006:16/big,   % GET DESCRIPTOR
     16#05,  % bDescriptorType (ENDPOINT)
     16#81,  % IN Endpoint:1
     16#03,  % bmAttributes
-    <<8:16/little>>,      % wMaxPacketSize
+    <<?INPUT_DATA_SIZE:16/little>>,      % wMaxPacketSize
     24  % bInterval
   ],
 
@@ -634,6 +664,68 @@ handle_urb(get, <<16#8106:16/big,   % GET DESCRIPTOR
   gen_tcp:send(Socket, [RespPrefix, Resp]),
   handle_command(RestBinary, Socket, State#state{pending_data = RestBinary});
 
+handle_urb(set, <<16#21,    % Host to device
+             9,    % bRequest  SET REPORT
+             _WValue:16/little,
+             0:16/little,
+             1:16/little, Payload:8, RestBinary/binary>>,
+            SequenceNumber, Socket, #state{timer_for_set = TimerRef} = State) ->
+    % SET LED
+  io:format("## SET LEDs CONFIGURATION~n"),
+  EmptyResp = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
+    <<SequenceNumber:32/big>>,
+    <<0:16/big, 0:16/big>>,   % Devid
+    <<0:32/big>>,    % Direction
+    <<0:32/big>>,    % Endpoint
+    <<0:32/big>>,    % Status success
+    <<1:32/big>>,
+    <<0:32/big>>,    % ISO start frame
+    <<0:32/big>>,    % Number of ISO descriptors
+    <<0:32/big>>,    % ISO error count
+    <<0:64/big>>    % Setup data
+  ],
+
+  gen_tcp:send(Socket, EmptyResp),
+
+  IsCapsLockEnabled = (Payload band 2) == 2,
+
+    case IsCapsLockEnabled /= State#state.caps_lock_enabled andalso State#state.send_caps_lock_messages of
+        true ->
+            sp_fsm:caps_lock_changed(State#state.fsm_pid, IsCapsLockEnabled);
+        _ ->
+            ok
+    end,
+
+  NewPendingKeys = case State#state.caps_lock_fix andalso not IsCapsLockEnabled of
+                       true ->
+                           % We have to enable it
+                           io:format("## ENABLE CAPS LOCK~n"),
+                           lists:foldl(fun(Key, Queue) -> pqueue2:in(Key, ?HIGH_PRIORITY, Queue) end, State#state.pending_keys, [caps_lock, none]);
+                       false ->
+                           State#state.pending_keys
+                   end,
+
+  State2 = State#state{pending_keys = NewPendingKeys, caps_lock_enabled = IsCapsLockEnabled},
+
+  State3 = case TimerRef of
+              undefined ->
+                  case State2#state.ready_for_keys of
+                      false ->
+                          State2;
+                      true ->
+                          % Maybe there are new keys to send
+                          check_and_send_key(State2)
+                  end;
+              _ ->
+                  % We were waiting for this SET REPORT to be ready, we can start sending keys
+                  io:format("## READY (SET REPORT)~n"),
+                  erlang:cancel_timer(TimerRef),
+                  {ok, FsmPid} = sp_fsm:start_link(self(), IsCapsLockEnabled),
+                  check_and_send_key(State2#state{timer_for_set = undefined, fsm_pid = FsmPid})
+           end,
+
+  io:format("## CAPS_LOCK ENABLED ~p\n", [IsCapsLockEnabled]),
+  handle_command(RestBinary, Socket, State3#state{pending_data = RestBinary});
 
 handle_urb(set, <<_,    % Host to device
              _,    % bRequest
@@ -675,7 +767,202 @@ bin_zero_pad(Binary, N) when size(Binary) =< N ->
   [Binary, binary:copy(<<0>>, N - size(Binary))].
 
 
+check_and_send_key(#state{socket = Socket, pending_keys = PendingKeys, submit_sequence = SequenceNumber, caps_lock_enabled = CapsLockEnabled} = State) ->
+    State2 = case pqueue2:is_empty(PendingKeys) of
+        true ->
+            State#state{ready_for_keys = true};
+        false ->
+            {{value, Key}, NewPendingKeys} = pqueue2:out(PendingKeys),
+            send_next_key(Socket, SequenceNumber, Key, CapsLockEnabled),
+            State#state{
+                        pending_keys = NewPendingKeys,
+                        submit_sequence = SequenceNumber,
+                        ready_for_keys = false}
+    end,
+
+    case pqueue2:is_empty(State2#state.pending_keys) andalso State2#state.from_wait_for_empty_buffer =/= undefined of
+        true ->
+            gen_server:reply(State2#state.from_wait_for_empty_buffer, ok),
+            State2#state{from_wait_for_empty_buffer = undefined};
+        false ->
+            State2
+    end.
 
 
+send_next_key(Socket, SequenceNumber, Key, CapsLockEnabled) ->
+    Data = key_to_data(Key, CapsLockEnabled),
+    io:format("Sending ~p~n", [Data]),
+    DataLength = size(Data),
+    RespPrefix = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
+        <<SequenceNumber:32/big>>,
+        <<0:16/big, 0:16/big>>,   % Devid
+        <<0:32/big>>,    % Direction
+        <<0:32/big>>,    % Endpoint
+        <<0:32/big>>,    % Status success
+        <<DataLength:32/big>>,
+        <<16#FFFFFFFF:32/unsigned-big>>,    % ISO start frame
+        <<0:32/big>>,    % Number of ISO descriptors
+        <<0:32/big>>,    % ISO error count
+        <<0:64/big>>     % Setup data
+    ],
+    ok = gen_tcp:send(Socket, [RespPrefix, Data]).
+
+key_to_data(escape, _) ->
+    <<1, 0, 16#29, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(ctrl_a, _) ->
+    <<1, 0, 4, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(ctrl_c, _) ->
+    <<1, 0, 6, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(ctrl_s, _) ->
+    <<1, 0, 22, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(caps_lock, _) ->
+    <<0, 0, 16#39, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(none, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(power, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 1, 0>>;
+key_to_data(sleep, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 1, 0>>;
+key_to_data(Letter, CapsLockEnabled) when Letter >= $A andalso Letter =< $Z ->
+    Shift = press_shift(CapsLockEnabled),
+    ScanCode = letter_to_scancode(Letter),
+    << Shift:8, 0, ScanCode:8, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(Letter, CapsLockEnabled)  when Letter >= $a andalso Letter =< $z ->
+    Shift = no_shift(CapsLockEnabled),
+    ScanCode = letter_to_scancode(Letter),
+    << Shift:8, 0, ScanCode:8, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(N, _) ->
+    ScanCode = key_to_scancode(N),
+    <<0, 0, ScanCode, 0, 0, 0, 0, 0, 0, 0>>.
+
+press_shift(false) ->
+    16#20;
+press_shift(true) ->
+    16#00.
+
+no_shift(false) ->
+    16#00;
+no_shift(true) ->
+    16#20.
+
+letter_to_scancode(Value) when Value == $A orelse Value == $a ->
+    4;
+letter_to_scancode(Value) when Value == $B orelse Value == $b ->
+    5;
+letter_to_scancode(Value) when Value == $C orelse Value == $c ->
+    6;
+letter_to_scancode(Value) when Value == $D orelse Value == $d ->
+    7;
+letter_to_scancode(Value) when Value == $E orelse Value == $e ->
+    8;
+letter_to_scancode(Value) when Value == $F orelse Value == $f ->
+    9;
+letter_to_scancode(Value) when Value == $G orelse Value == $g ->
+    10;
+letter_to_scancode(Value) when Value == $H orelse Value == $h ->
+    11;
+letter_to_scancode(Value) when Value == $I orelse Value == $i ->
+    12;
+letter_to_scancode(Value) when Value == $J orelse Value == $j ->
+    13;
+letter_to_scancode(Value) when Value == $K orelse Value == $k ->
+    14;
+letter_to_scancode(Value) when Value == $L orelse Value == $l ->
+    15;
+letter_to_scancode(Value) when Value == $M orelse Value == $m ->
+    16;
+letter_to_scancode(Value) when Value == $N orelse Value == $n ->
+    17;
+letter_to_scancode(Value) when Value == $O orelse Value == $o ->
+    18;
+letter_to_scancode(Value) when Value == $P orelse Value == $p ->
+    19;
+letter_to_scancode(Value) when Value == $Q orelse Value == $q ->
+    20;
+letter_to_scancode(Value) when Value == $R orelse Value == $r ->
+    21;
+letter_to_scancode(Value) when Value == $S orelse Value == $s ->
+    22;
+letter_to_scancode(Value) when Value == $T orelse Value == $t ->
+    23;
+letter_to_scancode(Value) when Value == $U orelse Value == $u ->
+    24;
+letter_to_scancode(Value) when Value == $V orelse Value == $v ->
+    25;
+letter_to_scancode(Value) when Value == $W orelse Value == $w ->
+    26;
+letter_to_scancode(Value) when Value == $X orelse Value == $x ->
+    27;
+letter_to_scancode(Value) when Value == $Y orelse Value == $y ->
+    28;
+letter_to_scancode(Value) when Value == $Z orelse Value == $z ->
+    29;
+letter_to_scancode(_) ->
+    0.
+
+key_to_scancode($\t) ->
+    16#2B;
+key_to_scancode($ ) ->
+    16#2C;
+key_to_scancode($\n) ->
+    16#28;
+key_to_scancode($=) ->
+    16#67;
+key_to_scancode($1) ->
+    16#1E;
+key_to_scancode($2) ->
+    16#1F;
+key_to_scancode($3) ->
+    16#20;
+key_to_scancode($4) ->
+    16#21;
+key_to_scancode($5) ->
+    16#22;
+key_to_scancode($6) ->
+    16#23;
+key_to_scancode($7) ->
+    16#24;
+key_to_scancode($8) ->
+    16#25;
+key_to_scancode($9) ->
+    16#26;
+key_to_scancode($0) ->
+    16#27;
+key_to_scancode($-) ->
+    16#56;
+key_to_scancode($#) ->
+    16#CC;
+key_to_scancode(_) ->
+    0.
 
 
+any_to_scancode(X) when is_integer(X) ->
+    case letter_to_scancode(X) of
+        0 ->
+            case key_to_scancode(X) of
+                0 ->
+                    X;
+                S1 ->
+                    S1
+            end;
+        S2 ->
+            S2
+    end;
+any_to_scancode(X) ->
+    X.
+
+%% @doc If there is the same key twice, insert a none
+filter_keys(Keys) ->
+    lists:reverse(filter_keys_internal(Keys, [])).
+
+filter_keys_internal([], Acc) ->
+    Acc;
+filter_keys_internal([A | [B | T]], Acc) ->
+    case any_to_scancode(A) == any_to_scancode(B) of
+        true ->
+            filter_keys_internal([B | T], [none | [A | Acc]]);
+        false ->
+            filter_keys_internal([B | T], [A | Acc])
+    end;
+filter_keys_internal([H | T], Acc) ->
+    filter_keys_internal(T, [H | Acc]).
