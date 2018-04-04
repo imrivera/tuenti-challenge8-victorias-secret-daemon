@@ -28,7 +28,8 @@
          fix_caps_lock/2,
          wait_for_empty_buffer/1,
          set_caps_lock/2,
-         send_caps_lock_messages/2]).
+         send_caps_lock_messages/2,
+         set_keys_per_second/2]).
 
 
 -define(HIGH_PRIORITY, 0).
@@ -47,10 +48,10 @@
 -define(USBIP_OP_REQ_DEVLIST, 16#8005).
 -define(USBIP_OP_REP_DEVLIST, 16#0005).
 
-%-define(DEVICE_SYSTEM_PATH, <<"/el/quinto/pinto">>).
-%-define(DEVICE_BUSID, <<"8-20">>).
--define(DEVICE_SYSTEM_PATH, <<"/sys/devices/pci0000:00/0000:00:14.0/usb1/1-14">>).
--define(DEVICE_BUSID, <<"1-14">>).
+-define(DEVICE_SYSTEM_PATH, <<"/tuenti/challenge/8/victorias/secret">>).
+-define(DEVICE_BUSID, <<"8-tuenti">>).
+%-define(DEVICE_SYSTEM_PATH, <<"/sys/devices/pci0000:00/0000:00:14.0/usb1/1-14">>).
+%-define(DEVICE_BUSID, <<"1-14">>).
 -define(DEVICE_BUS_NUMBER, 1).
 -define(DEVICE_NUMBER, 9).
 -define(DEVICE_CONNECTED_SPEED, 1). % 1 = Low speed
@@ -95,7 +96,11 @@
                 caps_lock_enabled = false :: boolean(),
                 fsm_pid = undefined :: undefined | pid(),
                 from_wait_for_empty_buffer = undefined,
-                send_caps_lock_messages = false :: boolean()}).
+                send_caps_lock_messages = false :: boolean(),
+                keys_per_second = 50 :: number(),
+                time_last_send :: integer(),
+                waiting_for_caps_lock :: undefined | boolean(),
+                from_waiting_for_caps_lock}).
 
 %%%===================================================================
 %%% API
@@ -135,6 +140,9 @@ wait_for_empty_buffer(SrvRef) ->
 send_caps_lock_messages(SrvRef, SendEnabled) ->
     gen_server:call(SrvRef, {send_caps_lock_messages, SendEnabled}).
 
+set_keys_per_second(SrvRef, KeysPerSecond) when is_integer(KeysPerSecond) andalso KeysPerSecond > 0 ->
+    gen_server:call(SrvRef, {set_keys_per_second, KeysPerSecond}).
+
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -156,7 +164,8 @@ send_caps_lock_messages(SrvRef, SendEnabled) ->
   {stop, Reason :: term()} | ignore).
 init([Socket]) ->
     io:format("I'M ~p~n", [self()]),
-  {ok, #state{socket = Socket, pending_data = <<>>, step = undefined, pending_keys = pqueue2:new()}}.
+  {ok, #state{socket = Socket, pending_data = <<>>, step = undefined, pending_keys = pqueue2:new(),
+              time_last_send = erlang:monotonic_time(millisecond)}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -205,10 +214,13 @@ handle_call({set_caps_lock, Value}, From, #state{caps_lock_enabled = IsCapsLockE
             % Already in required state
             {reply, ok, State#state{caps_lock_fix = false}};
         false ->
-            handle_call({send_keys, [caps_lock, none], ?HIGH_PRIORITY}, From, State#state{caps_lock_fix = false})
+            NewState = State#state{waiting_for_caps_lock = BoolValue, from_waiting_for_caps_lock = From, caps_lock_fix = false},
+            handle_call({send_keys, [caps_lock, none], ?HIGH_PRIORITY}, From, NewState)
     end;
 handle_call({send_caps_lock_messages, SendEnabled}, _From, State) ->
     {reply, ok, State#state{send_caps_lock_messages = SendEnabled}};
+handle_call({set_keys_per_second, KeysPerSecond}, _From, State) ->
+    {reply, ok, State#state{keys_per_second = KeysPerSecond}};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
@@ -261,7 +273,9 @@ handle_info(waiting_for_set_configuration_timeout, State) ->
     NewState = check_and_send_key(State),
     {ok, FsmPid} = sp_fsm:start_link(self(), State#state.caps_lock_enabled),
     {noreply, NewState#state{timer_for_set = undefined, fsm_pid = FsmPid}};
-
+handle_info(timeout_for_ready_keys, State) ->
+    NewState = check_and_send_key(State),
+    {noreply, NewState};
 handle_info({tcp_closed, _}, State) ->
   % Connection closed
   {stop, normal, State};
@@ -424,8 +438,23 @@ handle_cmd_submit(<<SequenceNumber:32/big,
           TimerRef = erlang:send_after(3000, self(), waiting_for_set_configuration_timeout),
           handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, submit_sequence = SequenceNumber, timer_for_set = TimerRef});
       false ->
-          NewState = check_and_send_key(State#state{submit_sequence = SequenceNumber}),
-          handle_command(RestBinary, Socket, NewState#state{pending_data = RestBinary})
+          io:format("## State#state.time_last_send = ~p~n", [State#state.time_last_send]),
+        MonotonicTime = erlang:monotonic_time(millisecond),
+          io:format("## MonotonicTime = ~p~n", [MonotonicTime]),
+        ElapsedTime = MonotonicTime - State#state.time_last_send,
+          io:format("## ElapsedTime = ~p~n", [ElapsedTime]),
+          io:format("## Delay = ~p~n", [(1000 / State#state.keys_per_second)]),
+          RemainingTime = (1000 / State#state.keys_per_second) - ElapsedTime,
+          io:format("## RemainingTime = ~p~n", [RemainingTime]),
+          case RemainingTime < 0 of
+            true ->
+              NewState = check_and_send_key(State#state{submit_sequence = SequenceNumber}),
+              handle_command(RestBinary, Socket, NewState#state{pending_data = RestBinary});
+            false ->
+              io:format("## round(ceil(RemainingTime)) = ~p~n", [round(ceil(RemainingTime))]),
+              erlang:send_after(round(ceil(RemainingTime)), self(), timeout_for_ready_keys),
+              handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, submit_sequence = SequenceNumber})
+          end
   end;
 handle_cmd_submit(_Binary, _, State) ->
   {ok, State}.
@@ -696,6 +725,8 @@ handle_urb(set, <<16#21,    % Host to device
             ok
     end,
 
+
+
   NewPendingKeys = case State#state.caps_lock_fix andalso not IsCapsLockEnabled of
                        true ->
                            % We have to enable it
@@ -709,13 +740,11 @@ handle_urb(set, <<16#21,    % Host to device
 
   State3 = case TimerRef of
               undefined ->
-                  case State2#state.ready_for_keys of
-                      false ->
                           State2;
-                      true ->
-                          % Maybe there are new keys to send
-                          check_and_send_key(State2)
-                  end;
+%                      true ->
+ %                         % Maybe there are new keys to send
+  %                        check_and_send_key(State2)
+   %               end;
               _ ->
                   % We were waiting for this SET REPORT to be ready, we can start sending keys
                   io:format("## READY (SET REPORT)~n"),
@@ -724,15 +753,23 @@ handle_urb(set, <<16#21,    % Host to device
                   check_and_send_key(State2#state{timer_for_set = undefined, fsm_pid = FsmPid})
            end,
 
+  State4 = case State3#state.waiting_for_caps_lock of
+             IsCapsLockEnabled ->
+               gen_server:reply(State3#state.from_waiting_for_caps_lock, ok),
+               State3#state{waiting_for_caps_lock = undefined, from_waiting_for_caps_lock = undefined};
+             _ ->
+               State3
+           end,
+
   io:format("## CAPS_LOCK ENABLED ~p\n", [IsCapsLockEnabled]),
-  handle_command(RestBinary, Socket, State3#state{pending_data = RestBinary});
+  handle_command(RestBinary, Socket, State4#state{pending_data = RestBinary});
 
 handle_urb(set, <<_,    % Host to device
              _,    % bRequest
              _WValue:16/little,
              _WIndex:16/little,
              WLength:16/little, _Payload:WLength/binary, RestBinary/binary>>,
-            SequenceNumber, Socket, #state{timer_for_set = TimerRef} = State) ->
+            SequenceNumber, Socket, State) ->
 
   io:format("##SET CONFIGURATION~n"),
   EmptyResp = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
@@ -749,14 +786,7 @@ handle_urb(set, <<_,    % Host to device
   ],
 
   gen_tcp:send(Socket, EmptyResp),
-  case TimerRef of
-    undefined ->
-      ok;
-    _ ->
-      erlang:cancel_timer(TimerRef),
-      self() ! next_key
-  end,
-  handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, timer_for_set = undefined});
+  handle_command(RestBinary, Socket, State#state{pending_data = RestBinary});
 
 handle_urb(_, _, _, _, State) ->
   io:format("## UNRECOGNIZED URB~n"),
@@ -773,11 +803,13 @@ check_and_send_key(#state{socket = Socket, pending_keys = PendingKeys, submit_se
             State#state{ready_for_keys = true};
         false ->
             {{value, Key}, NewPendingKeys} = pqueue2:out(PendingKeys),
+            NewTimestamp = erlang:monotonic_time(millisecond),
             send_next_key(Socket, SequenceNumber, Key, CapsLockEnabled),
             State#state{
                         pending_keys = NewPendingKeys,
                         submit_sequence = SequenceNumber,
-                        ready_for_keys = false}
+                        ready_for_keys = false,
+                        time_last_send = NewTimestamp}
     end,
 
     case pqueue2:is_empty(State2#state.pending_keys) andalso State2#state.from_wait_for_empty_buffer =/= undefined of
