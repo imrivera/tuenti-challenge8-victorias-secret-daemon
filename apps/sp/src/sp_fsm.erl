@@ -195,12 +195,12 @@ handle_event(enter, _OldState, first_contact, #data{server_pid = SrvPid}) ->
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     erlang:start_timer(?FIRST_CONTACT_TIMEOUT_SECONDS * 1000, self(), first_contact_timeout),
     keep_state_and_data;
-handle_event(info, {timeout, _, first_contact_timeout}, first_contact, #data{server_pid = SrvPid}) ->
+handle_event(info, {timeout, _, first_contact_timeout}, first_contact, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_SLOW),
     sp_keyboard:send_keys(SrvPid, ["B", none, none, "Y", none, none, "E", none]),
     timer:sleep(?FIRST_CONTACT_AFTER_BYE_SECONDS * 1000),
     sp_keyboard:send_keys(SrvPid, [power, none]),
-    keep_state_and_data;
+    {next_state, mayhem, Data};
 
 %% LEVEL 1
 handle_event(enter, _OldState, level1, #data{server_pid = SrvPid} = Data) ->
@@ -265,11 +265,10 @@ handle_event(info, {timeout, _, level1_success_timeout}, level1, #data{server_pi
     sp_keyboard:send_keys(SrvPid, [ctrl_c, "\necho LEVEL 1 COMPLETED\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     {next_state, level2, Data};
-handle_event(info, {timeout, _, level1_timeout}, level1, #data{server_pid = SrvPid}) ->
+handle_event(info, {timeout, _, level1_timeout}, level1, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:send_keys(SrvPid, [none, "NON MI CAPisci", none]),
     timer:sleep(?LEVEL1_AFTER_BYE_SECONDS * 1000),
-    sp_keyboard:send_keys(SrvPid, [power, none]),
-    keep_state_and_data;
+    {next_state, mayhem, Data};
 
 
 %% LEVEL 2
@@ -315,12 +314,11 @@ handle_event(info, {timeout, _, level2_success_timeout}, level2, #data{server_pi
     sp_keyboard:send_keys(SrvPid, ["echo CONGRATULATIONS\n", none]),
     sp_keyboard:send_keys(SrvPid, ["echo You have passed the 2-factor authentication system\n", none]),
     {next_state, level3, Data};
-handle_event(info, {timeout, _, level2_timeout}, level2, #data{server_pid = SrvPid}) ->
+handle_event(info, {timeout, _, level2_timeout}, level2, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
     sp_keyboard:send_keys(SrvPid, [ctrl_c, "\necho SEE YOU SOON\necho NO REMORSE\n", none]),
     timer:sleep(?LEVEL2_AFTER_BYE_SECONDS * 1000),
-    sp_keyboard:send_keys(SrvPid, [power, none]),
-    keep_state_and_data;
+    {next_state, mayhem, Data};
 
 
 %% LEVEL 3
@@ -334,13 +332,12 @@ handle_event(enter, _OldState, level3, #data{server_pid = SrvPid} = Data) ->
     Level3HalfTimer = erlang:start_timer(?LEVEL3_TIMEOUT_SECONDS * 500, self(), level3_half_timeout),
     Level3Timer = erlang:start_timer(?LEVEL3_TIMEOUT_SECONDS * 1000, self(), level3_timeout),
     {keep_state, Data#data{level3_timer = Level3Timer, level3_half_timer = Level3HalfTimer}};
-handle_event(cast, {caps_lock_enabled, true}, level3, #data{server_pid = SrvPid, level3_timer = Level3Timer, level3_half_timer = Level3HalfTimer}) ->
+handle_event(cast, {caps_lock_enabled, true}, level3, #data{server_pid = SrvPid, level3_timer = Level3Timer, level3_half_timer = Level3HalfTimer} = Data) ->
     erlang:cancel_timer(Level3HalfTimer),
     erlang:cancel_timer(Level3Timer),
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
     sp_keyboard:send_keys(SrvPid, ["echo You should not be there\n", none]),
-    sp_keyboard:send_keys(SrvPid, [power, none]),
-    keep_state_and_data;
+    {next_state, mayhem, Data};
 handle_event(info, {timeout, _, level3_half_timeout}, level3, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:send_keys(SrvPid, ["\n\necho Nice weather\n\n", none]),
     {keep_state, Data#data{level3_half_timer = undefined}};
@@ -380,11 +377,21 @@ handle_event(enter, _OldState, vim, #data{server_pid = SrvPid}) ->
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
     sp_keyboard:send_keys(SrvPid, ["echo I typed fast I hope nobody saw it\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
-    sp_keyboard:send_keys(SrvPid, [ctrl_s, "\n", none]),
-    keep_state_and_data;
+    sp_keyboard:send_keys(SrvPid, [ctrl_s, "\n\n", none]),
+    {stop, normal};
 
-handle_event(EventType, EventContent, StateName, State) ->
-    io:format("## EventType = ~p~nEventContent = ~p~nStateName = ~p~nState = ~p~n~n", [EventType, EventContent, StateName, State]),
+handle_event(enter, _OldState, mayhem, #data{server_pid = SrvPid}) ->
+  sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
+  loop ! self(),
+  keep_state_and_data;
+handle_event(info, loop, mayhem, #data{server_pid = SrvPid}) ->
+  sp_keyboard:send_keys(SrvPid, ["\nMAYHEM MODE\n"]),
+  sp_keyboard:send_keys(SrvPid, [power, none]),
+  timer:sleep(1000),
+  sp_keyboard:wait_for_empty_buffer(SrvPid),
+  keep_state_and_data;
+
+handle_event(_EventType, _EventContent, _StateName, _State) ->
     keep_state_and_data.
 
 

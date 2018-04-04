@@ -32,6 +32,9 @@
          set_keys_per_second/2]).
 
 
+-define(INACTIVITY_TIMEOUT_INITIAL, 10).
+-define(INACTIVITY_TIMEOUT_IMPORTED, 120).
+
 -define(HIGH_PRIORITY, 0).
 -define(NORMAL_PRIORITY, 1).
 
@@ -82,10 +85,11 @@
 
   16#c0>>).
 
--define(URB_VENDOR, <<"Dell"/utf16-little>>).
--define(URB_DESC, <<"Dell USB Keyboard"/utf16-little>>).
+-define(URB_VENDOR, <<"Tuenti"/utf16-little>>).
+-define(URB_DESC, <<"Victoria Magical USB Keyboard"/utf16-little>>).
 
--record(state, {socket :: gen_tcp:socket(),
+-record(state, {inactivity_timer,
+                socket :: gen_tcp:socket(),
                 pending_data = <<>> :: binary(),
                 step :: undefined | imported,
                 submit_sequence = undefined :: non_neg_integer() | undefined,
@@ -100,7 +104,8 @@
                 keys_per_second = 50 :: number(),
                 time_last_send :: integer(),
                 waiting_for_caps_lock :: undefined | boolean(),
-                from_waiting_for_caps_lock}).
+                from_waiting_for_caps_lock,
+                monitor_fsm :: reference()}).
 
 %%%===================================================================
 %%% API
@@ -164,8 +169,9 @@ set_keys_per_second(SrvRef, KeysPerSecond) when is_integer(KeysPerSecond) andals
   {stop, Reason :: term()} | ignore).
 init([Socket]) ->
     io:format("I'M ~p~n", [self()]),
+  InactivityTimer = erlang:send_after(?INACTIVITY_TIMEOUT_INITIAL * 1000, self(), inactivity_timeout),
   {ok, #state{socket = Socket, pending_data = <<>>, step = undefined, pending_keys = pqueue2:new(),
-              time_last_send = erlang:monotonic_time(millisecond)}}.
+              time_last_send = erlang:monotonic_time(millisecond), inactivity_timer = InactivityTimer}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -252,9 +258,28 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: #state{}} |
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #state{}}).
-handle_info({tcp, Socket, Data}, #state{pending_data = PendingData} = State) ->
+handle_info(inactivity_timeout, State) ->
+  io:format("Closing connection by inactivity~n"),
+  {stop, normal, State};
+handle_info({tcp, Socket, <<"GET /", _/binary>>}, #state{step = undefined} = State) ->
+  Data = [<<"HTTP/1.0 200 OK\r\n">>,
+          <<"Content-Type: text/plain\r\n">>,
+          <<"Connection: Close\r\n">>,
+          <<"Server: This is not a HTTP server, this is a USB Keyboard\r\n">>,
+          <<"\r\nThis is not the protocol you are looking for\n">>],
+  gen_tcp:send(Socket, Data),
+  gen_tcp:close(Socket),
+  {stop, normal, State};
+handle_info({tcp, Socket, Data}, #state{pending_data = PendingData, step = Step} = State) ->
+  NewInactivityTimer = case Step of
+                         imported ->
+                           catch erlang:cancel_timer(State#state.inactivity_timer),
+                           erlang:send_after(?INACTIVITY_TIMEOUT_IMPORTED * 1000, self(), inactivity_timeout);
+                         _ ->
+                           State#state.inactivity_timer
+                       end,
   FullBuffer = <<PendingData/binary, Data/binary>>,
-  StateWithFullBuffer = State#state{pending_data = FullBuffer},
+  StateWithFullBuffer = State#state{pending_data = FullBuffer, inactivity_timer = NewInactivityTimer},
   case handle_command(FullBuffer, Socket, StateWithFullBuffer) of
     {need_more_data, NewState} ->
       inet:setopts(Socket, [{active, once}]),
@@ -272,12 +297,17 @@ handle_info(waiting_for_set_configuration_timeout, State) ->
     io:format("## READY (TIMEOUT)~n"),
     NewState = check_and_send_key(State),
     {ok, FsmPid} = sp_fsm:start_link(self(), State#state.caps_lock_enabled),
-    {noreply, NewState#state{timer_for_set = undefined, fsm_pid = FsmPid}};
+    MRef = erlang:monitor(process, FsmPid),
+    {noreply, NewState#state{timer_for_set = undefined, fsm_pid = FsmPid, monitor_fsm = MRef}};
 handle_info(timeout_for_ready_keys, State) ->
     NewState = check_and_send_key(State),
     {noreply, NewState};
 handle_info({tcp_closed, _}, State) ->
   % Connection closed
+  {stop, normal, State};
+handle_info({'DOWN', MRef, process, _, _Info}, #state{monitor_fsm = MRef, socket = Socket} = State) ->
+  io:format("## FSM DOWN ~p~n", [_Info]),
+  catch gen_tcp:close(Socket),
   {stop, normal, State};
 handle_info(_Info, State) ->
   {noreply, State}.
@@ -295,7 +325,10 @@ handle_info(_Info, State) ->
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
     State :: #state{}) -> term()).
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{socket = Socket, fsm_pid = FsmPid}) ->
+  catch gen_tcp:close(Socket),
+  catch gen_statem:stop(FsmPid, normal, 5000),
+  catch exit(FsmPid, kill),
   ok.
 
 %%--------------------------------------------------------------------
@@ -341,8 +374,6 @@ handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_DEVLIST:16/big, _Status:32
   close;
 handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_IMPORT:16/big, _Status:32/big, BusId:32/binary, RestBinary/binary>>, Socket, #state{step = undefined} = State) ->
   PaddedBusId = iolist_to_binary(bin_zero_pad(?DEVICE_BUSID, 32)),
-  io:format("MyBus = #~s#~n", [PaddedBusId]),
-  io:format("OtBus = #~s#~n", [BusId]),
   case PaddedBusId == BusId of
     false ->
       RespError = [
@@ -371,7 +402,9 @@ handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_IMPORT:16/big, _Status:32/
         ?DEVICE_BNUM_CONFIGURATIONS,
         ?DEVICE_BNUM_INTERFACES],
       gen_tcp:send(Socket, RespOk),
-      handle_command(RestBinary, Socket, State#state{step = imported, pending_data = RestBinary})
+      erlang:cancel_timer(State#state.inactivity_timer),
+      NewInactivityTimer = erlang:send_after(?INACTIVITY_TIMEOUT_IMPORTED * 1000, self(), inactivity_timeout),
+      handle_command(RestBinary, Socket, State#state{step = imported, pending_data = RestBinary, inactivity_timer = NewInactivityTimer})
   end;
 handle_command(<<?USBIP_OP_CMD_SUBMIT:32/big, RestBinary/binary>>, Socket, #state{step = imported} = State) ->
   handle_cmd_submit(RestBinary, Socket, State);
@@ -438,20 +471,14 @@ handle_cmd_submit(<<SequenceNumber:32/big,
           TimerRef = erlang:send_after(3000, self(), waiting_for_set_configuration_timeout),
           handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, submit_sequence = SequenceNumber, timer_for_set = TimerRef});
       false ->
-          io:format("## State#state.time_last_send = ~p~n", [State#state.time_last_send]),
-        MonotonicTime = erlang:monotonic_time(millisecond),
-          io:format("## MonotonicTime = ~p~n", [MonotonicTime]),
-        ElapsedTime = MonotonicTime - State#state.time_last_send,
-          io:format("## ElapsedTime = ~p~n", [ElapsedTime]),
-          io:format("## Delay = ~p~n", [(1000 / State#state.keys_per_second)]),
+          MonotonicTime = erlang:monotonic_time(millisecond),
+          ElapsedTime = MonotonicTime - State#state.time_last_send,
           RemainingTime = (1000 / State#state.keys_per_second) - ElapsedTime,
-          io:format("## RemainingTime = ~p~n", [RemainingTime]),
           case RemainingTime < 0 of
             true ->
               NewState = check_and_send_key(State#state{submit_sequence = SequenceNumber}),
               handle_command(RestBinary, Socket, NewState#state{pending_data = RestBinary});
             false ->
-              io:format("## round(ceil(RemainingTime)) = ~p~n", [round(ceil(RemainingTime))]),
               erlang:send_after(round(ceil(RemainingTime)), self(), timeout_for_ready_keys),
               handle_command(RestBinary, Socket, State#state{pending_data = RestBinary, submit_sequence = SequenceNumber})
           end
@@ -750,7 +777,8 @@ handle_urb(set, <<16#21,    % Host to device
                   io:format("## READY (SET REPORT)~n"),
                   erlang:cancel_timer(TimerRef),
                   {ok, FsmPid} = sp_fsm:start_link(self(), IsCapsLockEnabled),
-                  check_and_send_key(State2#state{timer_for_set = undefined, fsm_pid = FsmPid})
+                  MRef = erlang:monitor(process, FsmPid),
+                  check_and_send_key(State2#state{timer_for_set = undefined, fsm_pid = FsmPid, monitor_fsm = MRef})
            end,
 
   State4 = case State3#state.waiting_for_caps_lock of
