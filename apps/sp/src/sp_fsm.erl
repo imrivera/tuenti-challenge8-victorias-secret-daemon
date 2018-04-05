@@ -34,7 +34,7 @@
 
 -define(LEVEL1_TIMEOUT_SECONDS, 20).
 -define(LEVEL1_AFTER_BYE_SECONDS, 1).
--define(LEVEL1_SUCCESS_TIMEOUT_SECONDS, 3).
+-define(LEVEL1_SUCCESS_TIMEOUT_SECONDS, 2).
 -define(LEVEL1_TIMES, 8).
 
 -define(LEVEL2_TIMEOUT_SECONDS, 30).
@@ -45,6 +45,8 @@
 -define(LEVEL2_AFTER_BYE_SECONDS, 1).
 
 -define(LEVEL3_TIMEOUT_SECONDS, 30).
+
+-define(MAYHEM_TIMEOUT_SECONDS, 30).
 
 -define(VIM_INITIAL, "73475cb40a568e8da8a045ced110137e159f890ac4da883b6b17dc651b3a8049").
 -define(VIM_FINAL,   "73475Cb40a568e8dA9a045ced110137e160f890ac4da883b6b17dc651b3a8049").
@@ -106,12 +108,12 @@ caps_lock_changed(SrvRef, CapsLockEnabled) ->
 %%--------------------------------------------------------------------
 init([KeyServer, IsCapsLockEnabled]) ->
     _NewState = case IsCapsLockEnabled of
-                   false ->
-                       first_contact;
                    true ->
+                       first_contact;
+                   false ->
                        level1
                end,
-    NewState = test,
+    NewState = _NewState,
     {ok, NewState, #data{server_pid = KeyServer, caps_lock_enabled = IsCapsLockEnabled}}.
 
 %%--------------------------------------------------------------------
@@ -179,37 +181,34 @@ state_name(_EventType, _EventContent, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_event(enter, _OldState, test, #data{server_pid = SrvPid}) ->
-  sp_keyboard:debug(),
+  %sp_keyboard:debug(),
+  %sp_keyboard:send_keys(SrvPid, [file, calculator, browser, email, eject, none, alt_f4, none]),
+  %sp_keyboard:fix_caps_lock(SrvPid, true),
+    %sp_keyboard:set_caps_lock(SrvPid, on),
+    %sp_keyboard:send_keys(SrvPid, ["hola", caps_lock, none]),
+    %timer:sleep(2000),
+    %sp_keyboard:send_keys(SrvPid, ["ADIOS", none]),
+    sp_keyboard:set_caps_lock(SrvPid, false),
   keep_state_and_data;
 
 
 %% FIRST CONTACT
 handle_event(enter, _OldState, first_contact, #data{server_pid = SrvPid}) ->
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
-    sp_keyboard:fix_caps_lock(SrvPid, true),
-    sp_keyboard:send_keys(SrvPid, ["echo I CANT HEAR YOU, PLEASE, TRY DOING THIS\n", none]),
-    sp_keyboard:send_keys(SrvPid, ["echo ", none]),
-    sp_keyboard:send_keys(SrvPid, ["594f5520535045414b205645525920534f46544c592c20504c454153452c20434f4e4e45435420535045414b494e47204c4f55444552\n",none]),
-    Text = binary_to_list(iolist_to_binary(io_lib:format("echo YOU HAVE ~p SECONDS\n", [?FIRST_CONTACT_TIMEOUT_SECONDS]))),
-    sp_keyboard:send_keys(SrvPid, [Text, none]),
+    sp_keyboard:send_keys(SrvPid, ["echo IT IS NOT POLITE TO ENTER IN A SERVER SHOUTING LIKE THAT\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["echo PLEASE DISABLE CAPS LOCK ", none]),
+    timer:sleep(1000),
+    sp_keyboard:send_keys(SrvPid, ["GO OUT AND COME BACK IN AGAIN\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
-    erlang:start_timer(?FIRST_CONTACT_TIMEOUT_SECONDS * 1000, self(), first_contact_timeout),
-    keep_state_and_data;
-handle_event(info, {timeout, _, first_contact_timeout}, first_contact, #data{server_pid = SrvPid} = Data) ->
-    sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_SLOW),
-    sp_keyboard:send_keys(SrvPid, ["B", none, none, "Y", none, none, "E", none]),
-    timer:sleep(?FIRST_CONTACT_AFTER_BYE_SECONDS * 1000),
-    sp_keyboard:send_keys(SrvPid, [power, none]),
-    {next_state, mayhem, Data};
+    {stop, normal};
+
 
 %% LEVEL 1
 handle_event(enter, _OldState, level1, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
-    sp_keyboard:set_caps_lock(SrvPid, off),
-    sp_keyboard:send_keys(SrvPid, ["echo Now I can hear you\n", none]),
-    sp_keyboard:send_keys(SrvPid, ["echo Lets check if you can see me\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["echo Starting the 2-factor authentication challenge\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["echo Lets check if you are able to follow simple instructions\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
-    sp_keyboard:set_caps_lock(SrvPid, off),
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
     sp_keyboard:send_keys(SrvPid, ["stty -echo\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
@@ -232,8 +231,8 @@ handle_event(cast, {caps_lock_enabled, false}, level1, #data{}) ->
 handle_event(cast, {caps_lock_enabled, true}, level1, #data{level1_counter = Counter, level1_timer = Level1Timer} = Data) ->
     NewCounter = Counter + 1,
     io:format("## CAPS LOCK ENABLED, NewCounter = ~p~n", [NewCounter]),
-    case NewCounter of
-        ?LEVEL1_TIMES ->
+    case NewCounter == ?LEVEL1_TIMES orelse NewCounter == (?LEVEL1_TIMES * 2) of
+        true ->
             % We achieved the correct number of times
             RestTime = case erlang:cancel_timer(Level1Timer) of
                            Time when is_integer(Time) ->
@@ -246,12 +245,7 @@ handle_event(cast, {caps_lock_enabled, true}, level1, #data{level1_counter = Cou
             NewLevel1Timer = erlang:start_timer((?LEVEL1_SUCCESS_TIMEOUT_SECONDS * 1000) + RestTime + 1, self(), level1_timeout),
             {keep_state, Data#data{level1_counter = NewCounter, level1_timer = NewLevel1Timer, level1_success_timer = SuccessTimer}};
         _ ->
-            case Data#data.level1_success_timer of
-                undefined ->
-                    ok;
-                _ ->
-                    erlang:cancel_timer(Data#data.level1_success_timer)
-            end,
+            cancel_timer(Data#data.level1_success_timer),
             {keep_state, Data#data{level1_counter = NewCounter, level1_success_timer = undefined}}
     end;
 handle_event(info, {timeout, _, level1_success_timeout}, level1, #data{server_pid = SrvPid, level1_timer = Level1Timer} = Data) ->
@@ -262,11 +256,13 @@ handle_event(info, {timeout, _, level1_success_timeout}, level1, #data{server_pi
         ok
     end,
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
-    sp_keyboard:send_keys(SrvPid, [ctrl_c, "\necho LEVEL 1 COMPLETED\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["\n\necho LEVEL 1 COMPLETED\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     {next_state, level2, Data};
 handle_event(info, {timeout, _, level1_timeout}, level1, #data{server_pid = SrvPid} = Data) ->
+    sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_SLOW),
     sp_keyboard:send_keys(SrvPid, [none, "NON MI CAPisci", none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
     timer:sleep(?LEVEL1_AFTER_BYE_SECONDS * 1000),
     {next_state, mayhem, Data};
 
@@ -293,7 +289,7 @@ handle_event(cast, {caps_lock_enabled, true}, level2, Data) ->
     KeyStartTime = erlang:monotonic_time(millisecond),
     KeyTimer = erlang:start_timer(?LEVEL2_DASH_TIME, self(), dash_timeout),
     {keep_state, Data#data{level2_key_start_time = KeyStartTime, level2_key_timer = KeyTimer}};
-handle_event(cast, {caps_lock_enabled, false}, level2, #data{level2_key_start_time = undefined} = Data) ->
+handle_event(cast, {caps_lock_enabled, false}, level2, #data{level2_key_start_time = undefined}) ->
     keep_state_and_data;
 handle_event(cast, {caps_lock_enabled, false}, level2, #data{server_pid = SrvPid, level2_buffer = Buffer} = Data) ->
     cancel_timer(Data#data.level2_key_timer),
@@ -310,8 +306,7 @@ handle_event(info, {timeout, _, level2_success_timeout}, level2, #data{server_pi
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
     cancel_timer(Data#data.level2_timer),
     cancel_timer(Data#data.level2_key_timer),
-    sp_keyboard:send_keys(SrvPid, [ctrl_c, none]),
-    sp_keyboard:send_keys(SrvPid, ["echo CONGRATULATIONS\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["\n\necho CONGRATULATIONS\n", none]),
     sp_keyboard:send_keys(SrvPid, ["echo You have passed the 2-factor authentication system\n", none]),
     {next_state, level3, Data};
 handle_event(info, {timeout, _, level2_timeout}, level2, #data{server_pid = SrvPid} = Data) ->
@@ -324,7 +319,6 @@ handle_event(info, {timeout, _, level2_timeout}, level2, #data{server_pid = SrvP
 %% LEVEL 3
 handle_event(enter, _OldState, level3, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
-    sp_keyboard:set_caps_lock(SrvPid, false),
     sp_keyboard:send_keys(SrvPid, [ctrl_c, "\n\necho Are you there\n", none]),
     sp_keyboard:send_keys(SrvPid, ["echo To say YES activate CAPS LOCK\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
@@ -336,6 +330,7 @@ handle_event(cast, {caps_lock_enabled, true}, level3, #data{server_pid = SrvPid,
     erlang:cancel_timer(Level3HalfTimer),
     erlang:cancel_timer(Level3Timer),
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
+    sp_keyboard:set_caps_lock(SrvPid, off),
     sp_keyboard:send_keys(SrvPid, ["echo You should not be there\n", none]),
     {next_state, mayhem, Data};
 handle_event(info, {timeout, _, level3_half_timeout}, level3, #data{server_pid = SrvPid} = Data) ->
@@ -352,8 +347,8 @@ handle_event(info, {timeout, _, level3_timeout}, level3, #data{server_pid = SrvP
 %% VIM
 handle_event(enter, _OldState, vim, #data{server_pid = SrvPid}) ->
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
-    sp_keyboard:set_caps_lock(SrvPid, false),
-    sp_keyboard:send_keys(SrvPid, ["vim solution-super-secret-password", none]),
+    sp_keyboard:set_caps_lock(SrvPid, off),
+    sp_keyboard:send_keys(SrvPid, ["vi solution-super-secret-password", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     timer:sleep(2000),
     sp_keyboard:send_keys(SrvPid, ["\n", none]),
@@ -377,19 +372,34 @@ handle_event(enter, _OldState, vim, #data{server_pid = SrvPid}) ->
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
     sp_keyboard:send_keys(SrvPid, ["echo I typed fast I hope nobody saw it\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
+    sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
     sp_keyboard:send_keys(SrvPid, [ctrl_s, "\n\n", none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
     {stop, normal};
 
 handle_event(enter, _OldState, mayhem, #data{server_pid = SrvPid}) ->
-  sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
-  loop ! self(),
-  keep_state_and_data;
+    sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
+    self() ! loop,
+    erlang:send_after(?MAYHEM_TIMEOUT_SECONDS * 1000, self(), mayhem_timeout),
+    keep_state_and_data;
 handle_event(info, loop, mayhem, #data{server_pid = SrvPid}) ->
-  sp_keyboard:send_keys(SrvPid, ["\nMAYHEM MODE\n"]),
-  sp_keyboard:send_keys(SrvPid, [power, none]),
-  timer:sleep(1000),
-  sp_keyboard:wait_for_empty_buffer(SrvPid),
-  keep_state_and_data;
+    Apps = generate_random_keys(keys_apps, 20),
+    sp_keyboard:send_keys(SrvPid, [Apps, none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
+    timer:sleep(5000),
+    sp_keyboard:send_keys(SrvPid, [sleep, none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
+    sp_keyboard:send_keys(SrvPid, [power, "\n", none]),
+    sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
+    Keys = generate_random_keys(keys, 200),
+    sp_keyboard:send_keys(SrvPid, [Keys, none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
+    timer:sleep(1000),
+    self() ! loop,
+    keep_state_and_data;
+handle_event(info, mayhem_timeout, mayhem, #data{server_pid = SrvPid}) ->
+    sp_keyboard:send_keys(SrvPid, ["BYE\n"]),
+    {stop, normal};
 
 handle_event(_EventType, _EventContent, _StateName, _State) ->
     keep_state_and_data.
@@ -443,6 +453,17 @@ callback_mode() ->
 %%%===================================================================
 
 cancel_timer(undefined) ->
-    ok;
+    0;
 cancel_timer(Ref) ->
     erlang:cancel_timer(Ref).
+
+generate_random_keys(Ets, Count) ->
+    EtsSize = ets:info(Ets, size),
+    generate_random_keys(Ets, EtsSize, Count, []).
+
+generate_random_keys(_Ets, _EtsSize, 0, Acc) ->
+    Acc;
+generate_random_keys(Ets, EtsSize, Count, Acc) ->
+    N = rand:uniform(EtsSize),
+    [{_, Key}] = ets:lookup(Ets, N),
+    generate_random_keys(Ets, EtsSize, Count - 1, [Key | Acc]).

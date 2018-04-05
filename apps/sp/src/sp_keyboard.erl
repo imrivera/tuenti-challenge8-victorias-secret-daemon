@@ -78,15 +78,26 @@
   16#95, 16#01, 16#75, 16#01, 16#05, 16#01, 16#09, 16#82, 16#81, 16#02, % Sleep 1-bit
   16#95, 16#01, 16#75, 16#06, 16#81, 16#01,  % 6-bit padding
 
-  15#01, 25#01, 16#0B, 16#96, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#60,
+  15#01, 25#01, 16#0B, 16#B8, 16#00, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % B8 Eject
+  15#01, 25#01, 16#0B, 16#E9, 16#00, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % E9 Volume Up
+  15#01, 25#01, 16#0B, 16#B3, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % 1B3 Clock
+  15#01, 25#01, 16#0B, 16#8A, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % 18A Email reader
+  15#01, 25#01, 16#0B, 16#B6, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % 1B6 Image browser
+  15#01, 25#01, 16#0B, 16#92, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % 192 Calculator
+  15#01, 25#01, 16#0B, 16#96, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % 196 Internet Browser
+  15#01, 25#01, 16#0B, 16#B4, 16#01, 16#0C, 16#00, 16#95, 16#01, 16#75, 16#01, 16#81, 16#02,  % 1B4 File Browser
+
+
+
+
   %16#95, 16#01, 16#75, 16#01, 16#05, 16#0C, 16#0B, 16#92, 16#01, 16#00, 16#81, 16#02,
-  16#95, 16#01, 16#75, 16#07, 16#81, 16#01,
+  %16#95, 16#01, 16#75, 16#07, 16#81, 16#01,
 
 
   16#c0>>).
 
 -define(URB_VENDOR, <<"Tuenti"/utf16-little>>).
--define(URB_DESC, <<"Victoria Magical USB Keyboard"/utf16-little>>).
+-define(URB_DESC, <<"Victoria's Magical USB Keyboard"/utf16-little>>).
 
 -record(state, {inactivity_timer,
                 socket :: gen_tcp:socket(),
@@ -205,7 +216,7 @@ handle_call({fix_caps_lock, Value}, _From, #state{caps_lock_enabled = true} = St
     {reply, ok, State#state{caps_lock_fix = Value}};
 handle_call({fix_caps_lock, true}, From, State) ->
     % We want to enable caps_lock and we know it's disabled
-    handle_call({send_keys, [caps_lock, none], ?HIGH_PRIORITY}, From, State#state{caps_lock_fix = true});
+    handle_call({send_keys, [caps_lock, " ", backspace, none], ?HIGH_PRIORITY}, From, State#state{caps_lock_fix = true});
 handle_call(wait_for_empty_buffer, From, #state{pending_keys = PendingKeys} = State) ->
     case pqueue2:is_empty(PendingKeys) of
         true ->
@@ -221,7 +232,7 @@ handle_call({set_caps_lock, Value}, From, #state{caps_lock_enabled = IsCapsLockE
             {reply, ok, State#state{caps_lock_fix = false}};
         false ->
             NewState = State#state{waiting_for_caps_lock = BoolValue, from_waiting_for_caps_lock = From, caps_lock_fix = false},
-            handle_call({send_keys, [caps_lock, none], ?HIGH_PRIORITY}, From, NewState)
+            handle_call({send_keys, [caps_lock, " ", backspace, none], ?HIGH_PRIORITY}, From, NewState)
     end;
 handle_call({send_caps_lock_messages, SendEnabled}, _From, State) ->
     {reply, ok, State#state{send_caps_lock_messages = SendEnabled}};
@@ -262,7 +273,7 @@ handle_info(inactivity_timeout, State) ->
   io:format("Closing connection by inactivity~n"),
   {stop, normal, State};
 handle_info({tcp, Socket, <<"GET /", _/binary>>}, #state{step = undefined} = State) ->
-  Data = [<<"HTTP/1.0 200 OK\r\n">>,
+  Data = [<<"HTTP/1.0 418 I'm a keyboard!\r\n">>,
           <<"Content-Type: text/plain\r\n">>,
           <<"Connection: Close\r\n">>,
           <<"Server: This is not a HTTP server, this is a USB Keyboard\r\n">>,
@@ -464,7 +475,7 @@ handle_cmd_submit(<<SequenceNumber:32/big,
                     Socket,
                     #state{submit_sequence = OldSubmitSequence} = State) ->
 
-  io:format("## URB SUBMIT ~p~n", [SequenceNumber]),
+  %io:format("## URB SUBMIT ~p~n", [SequenceNumber]),
   case OldSubmitSequence == undefined of
       true ->
           % This is the first submit, we are not ready yet, wait for a SET CONFIGURATION or timeout
@@ -758,7 +769,7 @@ handle_urb(set, <<16#21,    % Host to device
                        true ->
                            % We have to enable it
                            io:format("## ENABLE CAPS LOCK~n"),
-                           lists:foldl(fun(Key, Queue) -> pqueue2:in(Key, ?HIGH_PRIORITY, Queue) end, State#state.pending_keys, [caps_lock, none]);
+                           lists:foldl(fun(Key, Queue) -> pqueue2:in(Key, ?HIGH_PRIORITY, Queue) end, State#state.pending_keys, [caps_lock,  " ", backspace, none]);
                        false ->
                            State#state.pending_keys
                    end,
@@ -851,7 +862,7 @@ check_and_send_key(#state{socket = Socket, pending_keys = PendingKeys, submit_se
 
 send_next_key(Socket, SequenceNumber, Key, CapsLockEnabled) ->
     Data = key_to_data(Key, CapsLockEnabled),
-    io:format("Sending ~p~n", [Data]),
+    %io:format("Sending Key ~p ~p~n", [Key, Data]),
     DataLength = size(Data),
     RespPrefix = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
         <<SequenceNumber:32/big>>,
@@ -867,11 +878,31 @@ send_next_key(Socket, SequenceNumber, Key, CapsLockEnabled) ->
     ],
     ok = gen_tcp:send(Socket, [RespPrefix, Data]).
 
+key_to_data(f1, _) ->
+    <<0, 0, 16#3A, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(backspace, _) ->
+    <<0, 0, 16#2A, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(print_screen, _) ->
+    <<0, 0, 16#46, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(page_up, _) ->
+    <<0, 0, 16#4B, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(page_down, _) ->
+    <<0, 0, 16#4E, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(arrow_right, _) ->
+    <<0, 0, 16#4F, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(arrow_left, _) ->
+    <<0, 0, 16#50, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(arrow_down, _) ->
+    <<0, 0, 16#51, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(arrow_up, _) ->
+    <<0, 0, 16#52, 0, 0, 0, 0, 0, 0, 0>>;
 key_to_data(escape, _) ->
-    <<1, 0, 16#29, 0, 0, 0, 0, 0, 0, 0>>;
+    <<0, 0, 16#29, 0, 0, 0, 0, 0, 0, 0>>;
 key_to_data(ctrl_a, _) ->
     <<1, 0, 4, 0, 0, 0, 0, 0, 0, 0>>;
 key_to_data(ctrl_c, _) ->
+    <<1, 0, 6, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(ctrl_d, _) ->
     <<1, 0, 6, 0, 0, 0, 0, 0, 0, 0>>;
 key_to_data(ctrl_s, _) ->
     <<1, 0, 22, 0, 0, 0, 0, 0, 0, 0>>;
@@ -883,6 +914,23 @@ key_to_data(power, _) ->
     <<0, 0, 0, 0, 0, 0, 0, 0, 1, 0>>;
 key_to_data(sleep, _) ->
     <<0, 0, 0, 0, 0, 0, 0, 0, 1, 0>>;
+key_to_data(eject, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 1>>;
+key_to_data(ctrl_f4, _) ->
+    <<16#01, 0, 16#3D, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(alt_f4, _) ->
+    <<16#04, 0, 16#3D, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(alt_tab, _) ->
+    <<16#04, 0, 16#2B, 0, 0, 0, 0, 0, 0, 0>>;
+key_to_data(email, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 8>>;
+key_to_data(calculator, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 32>>;
+key_to_data(browser, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 64>>;
+key_to_data(file, _) ->
+    <<0, 0, 0, 0, 0, 0, 0, 0, 0, 128>>;
+
 key_to_data(Letter, CapsLockEnabled) when Letter >= $A andalso Letter =< $Z ->
     Shift = press_shift(CapsLockEnabled),
     ScanCode = letter_to_scancode(Letter),

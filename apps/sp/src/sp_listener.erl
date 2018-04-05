@@ -24,6 +24,12 @@
 
 -define(SERVER, ?MODULE).
 
+-define(KEYS_APPS, [calculator, email, browser, file, eject]).
+-define(KEYS, [calculator, email, browser, file, eject,
+               alt_f4, ctrl_c, alt_tab, ctrl_d, f1,
+               backspace, arrow_up, arrow_down, arrow_left, arrow_right, print_screen, page_up, page_down,
+               "\n0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ -"]).
+
 -record(state, {listener_socket :: gen_tcp:socket()}).
 
 %%%===================================================================
@@ -61,6 +67,10 @@ start_link() ->
   {stop, Reason :: term()} | ignore).
 init([]) ->
   {ok, ListenSocket} = gen_tcp:listen(0, [binary, {active, once}, {backlog, 100}, {port, 3240}, {ip, any}, {reuseaddr, true}, {nodelay, true}]),
+  ets:new(keys_apps, [set, public, {read_concurrency, true}, named_table]),
+  ets:new(keys, [set, public, {read_concurrency, true}, named_table]),
+  fill_keys(keys_apps, ?KEYS_APPS),
+  fill_keys(keys, ?KEYS),
   self() ! listen,
   {ok, #state{listener_socket = ListenSocket}}.
 
@@ -152,3 +162,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+fill_keys(Ets, Keys) ->
+  Flatten = lists:flatten(Keys),
+  lists:foldl(fun(Key, Index) -> true = ets:insert(Ets, {Index, Key}), Index + 1 end, 1, Flatten).
