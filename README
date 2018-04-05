@@ -1,0 +1,5 @@
+# Run as daemon
+bin/sp start
+
+# Run as program
+bin/sp foreground
