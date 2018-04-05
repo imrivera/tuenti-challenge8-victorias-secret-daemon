@@ -37,9 +37,9 @@
 -define(LEVEL1_SUCCESS_TIMEOUT_SECONDS, 2).
 -define(LEVEL1_TIMES, 8).
 
--define(LEVEL2_TIMEOUT_SECONDS, 30).
-%-define(LEVEL2_MORSE_CODE, <<"-..-.-.-..---..">>).
--define(LEVEL2_MORSE_CODE, <<"-.">>).
+-define(LEVEL2_TIMEOUT_SECONDS, 40).
+-define(LEVEL2_MORSE_CODE, <<"-..-.-.-..---..">>).
+%-define(LEVEL2_MORSE_CODE, <<"-.">>).
 -define(LEVEL2_SUCCESS_TIMEOUT_SECONDS, 3).
 -define(LEVEL2_DASH_TIME, 1000).
 -define(LEVEL2_AFTER_BYE_SECONDS, 1).
