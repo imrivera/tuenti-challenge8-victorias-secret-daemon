@@ -12,7 +12,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start/1]).
+-export([start/4]).
 -export([debug/0]).
 
 %% gen_server callbacks
@@ -99,7 +99,11 @@
 -define(URB_VENDOR, <<"Tuenti"/utf16-little>>).
 -define(URB_DESC, <<"Victoria's Magical USB Keyboard"/utf16-little>>).
 
--record(state, {inactivity_timer,
+-record(state, {id,
+                ip_address :: inet:ip_address(),
+                port :: inet:port_number(),
+
+                inactivity_timer,
                 socket :: gen_tcp:socket(),
                 pending_data = <<>> :: binary(),
                 step :: undefined | imported,
@@ -128,10 +132,10 @@
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(start(gen_tcp:socket()) ->
+-spec(start(gen_tcp:socket(), non_neg_integer(), string(), inet:port_number()) ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
-start(Socket) ->
-  gen_server:start(?MODULE, [Socket], []).
+start(Socket, Id, IpAddressString, Port) ->
+  gen_server:start(?MODULE, [Socket, Id, IpAddressString, Port], []).
 
 debug() ->
   dbg:tracer(),
@@ -178,11 +182,11 @@ set_keys_per_second(SrvRef, KeysPerSecond) when is_integer(KeysPerSecond) andals
 -spec(init(Args :: term()) ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
-init([Socket]) ->
-    io:format("I'M ~p~n", [self()]),
+init([Socket, Id, IpAddressString, Port]) ->
   InactivityTimer = erlang:send_after(?INACTIVITY_TIMEOUT_INITIAL * 1000, self(), inactivity_timeout),
   {ok, #state{socket = Socket, pending_data = <<>>, step = undefined, pending_keys = pqueue2:new(),
-              time_last_send = erlang:monotonic_time(millisecond), inactivity_timer = InactivityTimer}}.
+              time_last_send = erlang:monotonic_time(millisecond), inactivity_timer = InactivityTimer,
+              id = Id, ip_address = IpAddressString, port = Port}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -270,9 +274,10 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #state{}}).
 handle_info(inactivity_timeout, State) ->
-  io:format("Closing connection by inactivity~n"),
+    lager:info("~s Closing connection by inactivity", [log_prefix(State)]),
   {stop, normal, State};
 handle_info({tcp, Socket, <<"GET /", _/binary>>}, #state{step = undefined} = State) ->
+    lager:info("~s HTTP Request", [log_prefix(State)]),
   Data = [<<"HTTP/1.0 418 I'm a keyboard!\r\n">>,
           <<"Content-Type: text/plain\r\n">>,
           <<"Connection: Close\r\n">>,
@@ -305,9 +310,10 @@ handle_info(waiting_for_set_configuration_timeout, #state{timer_for_set = undefi
     % This message arrived too late, SET REPORT already handled this case, just ignore it
     {noreply, State};
 handle_info(waiting_for_set_configuration_timeout, State) ->
-    io:format("## READY (TIMEOUT)~n"),
+    lager:debug("## READY (TIMEOUT)"),
     NewState = check_and_send_key(State),
-    {ok, FsmPid} = sp_fsm:start_link(self(), State#state.caps_lock_enabled),
+    {ok, FsmPid} = sp_fsm:start_link(self(), State#state.caps_lock_enabled, State#state.id, State#state.ip_address, State#state.port),
+    lager:info("~s Started FSM by TIMEOUT~p", [log_prefix(State), FsmPid]),
     MRef = erlang:monitor(process, FsmPid),
     {noreply, NewState#state{timer_for_set = undefined, fsm_pid = FsmPid, monitor_fsm = MRef}};
 handle_info(timeout_for_ready_keys, State) ->
@@ -317,7 +323,7 @@ handle_info({tcp_closed, _}, State) ->
   % Connection closed
   {stop, normal, State};
 handle_info({'DOWN', MRef, process, _, _Info}, #state{monitor_fsm = MRef, socket = Socket} = State) ->
-  io:format("## FSM DOWN ~p~n", [_Info]),
+  lager:debug("## FSM DOWN ~p", [_Info]),
   catch gen_tcp:close(Socket),
   {stop, normal, State};
 handle_info(_Info, State) ->
@@ -360,8 +366,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_DEVLIST:16/big, _Status:32/big, _RestBinary/binary>>, Socket, #state{step = undefined}) ->
-  io:format("USBIP_OP_REQ_DEVLIST~n"),
+handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_DEVLIST:16/big, _Status:32/big, _RestBinary/binary>>, Socket, #state{step = undefined} = State) ->
+  lager:info("~s USBIP_OP_REQ_DEVLIST", [log_prefix(State)]),
   Resp = [
     <<?USBIP_VERSION:16/big,
       ?USBIP_OP_REP_DEVLIST:16/big,
@@ -426,7 +432,7 @@ handle_command(<<?USBIP_OP_CMD_UNLINK:32/big, SequenceNumber:32/big, ?DEVICE_BUS
     _:24/binary, % ???
     RestBinary/binary>>, Socket, #state{step = imported} = State) ->
 
-  io:format ("## UNLINK ~p~n", [UnlinkSequenceNumber]),
+  lager:debug("## UNLINK ~p~n", [UnlinkSequenceNumber]),
   Resp = [<<?USBIP_OP_RET_UNLINK:32/big>>,
     <<SequenceNumber:32/big>>,
     <<0:16/big, 0:16/big>>,   % Devid
@@ -475,7 +481,7 @@ handle_cmd_submit(<<SequenceNumber:32/big,
                     Socket,
                     #state{submit_sequence = OldSubmitSequence} = State) ->
 
-  %io:format("## URB SUBMIT ~p~n", [SequenceNumber]),
+  lager:debug("## URB SUBMIT ~p~n", [SequenceNumber]),
   case OldSubmitSequence == undefined of
       true ->
           % This is the first submit, we are not ready yet, wait for a SET CONFIGURATION or timeout
@@ -738,7 +744,7 @@ handle_urb(set, <<16#21,    % Host to device
              1:16/little, Payload:8, RestBinary/binary>>,
             SequenceNumber, Socket, #state{timer_for_set = TimerRef} = State) ->
     % SET LED
-  io:format("## SET LEDs CONFIGURATION~n"),
+  lager:debug("## SET LEDs CONFIGURATION~n"),
   EmptyResp = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
     <<SequenceNumber:32/big>>,
     <<0:16/big, 0:16/big>>,   % Devid
@@ -768,7 +774,7 @@ handle_urb(set, <<16#21,    % Host to device
   NewPendingKeys = case State#state.caps_lock_fix andalso not IsCapsLockEnabled of
                        true ->
                            % We have to enable it
-                           io:format("## ENABLE CAPS LOCK~n"),
+                           lager:debug("## ENABLE CAPS LOCK~n"),
                            lists:foldl(fun(Key, Queue) -> pqueue2:in(Key, ?HIGH_PRIORITY, Queue) end, State#state.pending_keys, [caps_lock,  " ", backspace, none]);
                        false ->
                            State#state.pending_keys
@@ -785,9 +791,10 @@ handle_urb(set, <<16#21,    % Host to device
    %               end;
               _ ->
                   % We were waiting for this SET REPORT to be ready, we can start sending keys
-                  io:format("## READY (SET REPORT)~n"),
+                  lager:debug("## READY (SET REPORT)~n"),
                   erlang:cancel_timer(TimerRef),
-                  {ok, FsmPid} = sp_fsm:start_link(self(), IsCapsLockEnabled),
+                  {ok, FsmPid} = sp_fsm:start_link(self(), IsCapsLockEnabled, State#state.id, State#state.ip_address, State#state.port),
+                  lager:info("~s Started FSM by SET REPORT ~p", [log_prefix(State), FsmPid]),
                   MRef = erlang:monitor(process, FsmPid),
                   check_and_send_key(State2#state{timer_for_set = undefined, fsm_pid = FsmPid, monitor_fsm = MRef})
            end,
@@ -800,7 +807,7 @@ handle_urb(set, <<16#21,    % Host to device
                State3
            end,
 
-  io:format("## CAPS_LOCK ENABLED ~p\n", [IsCapsLockEnabled]),
+  lager:debug("## CAPS_LOCK ENABLED ~p\n", [IsCapsLockEnabled]),
   handle_command(RestBinary, Socket, State4#state{pending_data = RestBinary});
 
 handle_urb(set, <<_,    % Host to device
@@ -810,7 +817,7 @@ handle_urb(set, <<_,    % Host to device
              WLength:16/little, _Payload:WLength/binary, RestBinary/binary>>,
             SequenceNumber, Socket, State) ->
 
-  io:format("##SET CONFIGURATION~n"),
+  lager:debug("##SET CONFIGURATION~n"),
   EmptyResp = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
     <<SequenceNumber:32/big>>,
     <<0:16/big, 0:16/big>>,   % Devid
@@ -828,7 +835,7 @@ handle_urb(set, <<_,    % Host to device
   handle_command(RestBinary, Socket, State#state{pending_data = RestBinary});
 
 handle_urb(_, _, _, _, State) ->
-  io:format("## UNRECOGNIZED URB~n"),
+  lager:debug("## UNRECOGNIZED URB~n"),
   {ok, State}.
 
 -spec bin_zero_pad(binary(), non_neg_integer()) -> iolist().
@@ -862,7 +869,7 @@ check_and_send_key(#state{socket = Socket, pending_keys = PendingKeys, submit_se
 
 send_next_key(Socket, SequenceNumber, Key, CapsLockEnabled) ->
     Data = key_to_data(Key, CapsLockEnabled),
-    %io:format("Sending Key ~p ~p~n", [Key, Data]),
+    lager:debug("Sending Key ~p ~p~n", [Key, Data]),
     DataLength = size(Data),
     RespPrefix = [<<?USBIP_OP_RET_SUBMIT:32/big>>,
         <<SequenceNumber:32/big>>,
@@ -1074,3 +1081,7 @@ filter_keys_internal([A | [B | T]], Acc) ->
     end;
 filter_keys_internal([H | T], Acc) ->
     filter_keys_internal(T, [H | Acc]).
+
+
+log_prefix(#state{id = Id, ip_address = IpAddressString, port = Port}) ->
+    io_lib:format("keyboard ID ~B ~p ~s:~B", [Id, self(), IpAddressString, Port]).

@@ -5,7 +5,10 @@
   {mod, { sp_app, []}},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    pqueue,
+    sasl,
+    lager
    ]},
   {env,[]},
   {modules, []},

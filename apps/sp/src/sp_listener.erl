@@ -30,7 +30,8 @@
                backspace, arrow_up, arrow_down, arrow_left, arrow_right, print_screen, page_up, page_down,
                "\n0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ -"]).
 
--record(state, {listener_socket :: gen_tcp:socket()}).
+-record(state, {listener_socket :: gen_tcp:socket(), counter = 0, id = 0}).
+-record(tracking, {ip_address :: string(), port :: inet:port_number(), id, start_time, pid}).
 
 %%%===================================================================
 %%% API
@@ -66,11 +67,16 @@ start_link() ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  {ok, ListenSocket} = gen_tcp:listen(0, [binary, {active, once}, {backlog, 100}, {port, 3240}, {ip, any}, {reuseaddr, true}, {nodelay, true}]),
+  Port = application:get_env(sp, listen_port, 3240),
+  SendTimeout = application:get_env(sp, send_timeout, 5000),
+  lager:info("Creating listening socket on port ~p", [Port]),
+  {ok, ListenSocket} = gen_tcp:listen(0, [binary, {send_timeout, SendTimeout}, {send_timeout_close, true}, {active, once}, {backlog, 100}, {port, Port}, {ip, any}, {reuseaddr, true}, {nodelay, true}]),
+  lager:info("Socket successfully created"),
   ets:new(keys_apps, [set, public, {read_concurrency, true}, named_table]),
   ets:new(keys, [set, public, {read_concurrency, true}, named_table]),
   fill_keys(keys_apps, ?KEYS_APPS),
   fill_keys(keys, ?KEYS),
+  ets:new(client_monitors, [set, public, named_table]),
   self() ! listen,
   {ok, #state{listener_socket = ListenSocket}}.
 
@@ -120,12 +126,47 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: #state{}} |
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #state{}}).
-handle_info(listen, #state{listener_socket = ListenSocket} = State) ->
-  {ok, Socket} = gen_tcp:accept(ListenSocket),
-  {ok, WorkerPid} = sp_keyboard:start(Socket),
-  gen_tcp:controlling_process(Socket, WorkerPid),
-  self() ! listen,
-  {noreply, State};
+handle_info(listen, #state{listener_socket = ListenSocket, counter = Counter, id = Id} = State) ->
+  case gen_tcp:accept(ListenSocket, 3000) of
+    {ok, Socket} ->
+      StartTime = erlang:monotonic_time(seconds),
+      {ok, {IPAddress, Port}} = inet:peername(Socket),
+      IPAddressString = inet:ntoa(IPAddress),
+
+      {ok, WorkerPid} = sp_keyboard:start(Socket, Id, IPAddressString, Port),
+      gen_tcp:controlling_process(Socket, WorkerPid),
+
+
+      NewCounter = Counter + 1,
+      lager:info("Client connected from ~s:~B  PID: ~p  ID: ~B  Concurrent clients: ~B", [IPAddressString, Port, WorkerPid, Id, NewCounter]),
+
+      MRef = erlang:monitor(process, WorkerPid),
+      ets:insert(client_monitors, {MRef, #tracking{ip_address = IPAddressString, port = Port, id = Id, pid = WorkerPid, start_time = StartTime}}),
+      self() ! listen,
+      {noreply, State#state{counter = NewCounter, id = Id + 1}};
+    {error, timeout} ->
+      self() ! listen,
+      {noreply, State}
+  end;
+handle_info({'DOWN', MRef, process, _, Info}, #state{counter = Counter} = State) ->
+  case catch ets:lookup(client_monitors, MRef) of
+    [{_, #tracking{} = Tracking}] ->
+      NewCounter = Counter - 1,
+      ElapsedSeconds = erlang:monotonic_time(seconds) - Tracking#tracking.start_time,
+      lager:info("Client disconnected from ~s:~B  Reason: \"~p\"  PID: ~p  ID: ~B  Connected time: ~B seconds  Concurrent clients: ~B", [
+        Tracking#tracking.ip_address,
+        Tracking#tracking.port,
+        Info,
+        Tracking#tracking.pid,
+        Tracking#tracking.id,
+        ElapsedSeconds,
+        NewCounter
+      ]),
+      ets:delete(client_monitors, MRef),
+      {noreply, State#state{counter = NewCounter}};
+    _ ->
+      {noreply, State}
+  end;
 handle_info(_Info, State) ->
   {noreply, State}.
 
