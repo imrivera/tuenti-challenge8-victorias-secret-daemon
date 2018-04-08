@@ -12,7 +12,7 @@
 -behaviour(gen_statem).
 
 %% API
--export([start_link/5,
+-export([start_link/6,
          caps_lock_changed/2]).
 
 %% gen_statem callbacks
@@ -57,6 +57,8 @@
                ip_address :: inet:ip_address(),
                port :: inet:port_number(),
 
+               device,
+
                server_pid :: pid(),
                caps_lock_enabled :: boolean(),
                level1_timer :: reference(),
@@ -85,8 +87,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(KeyServer, IsCapsLockEnabled, Id, IpAddress, Port) ->
-    gen_statem:start_link(?MODULE, [KeyServer, IsCapsLockEnabled, Id, IpAddress, Port], []).
+start_link(Device, KeyServer, IsCapsLockEnabled, Id, IpAddress, Port) ->
+    gen_statem:start_link(?MODULE, [Device, KeyServer, IsCapsLockEnabled, Id, IpAddress, Port], []).
 
 caps_lock_changed(undefined, _) ->
     ok;
@@ -110,16 +112,21 @@ caps_lock_changed(SrvRef, CapsLockEnabled) ->
 %%                     {stop, StopReason}
 %% @end
 %%--------------------------------------------------------------------
-init([KeyServer, IsCapsLockEnabled, Id, IpAddress, Port]) ->
+init([Device, KeyServer, IsCapsLockEnabled, Id, IpAddress, Port]) ->
     _NewState = case IsCapsLockEnabled of
                    true ->
                        first_contact;
                    false ->
-                       level1
+                       case Device of
+                           first ->
+                               level1;
+                           second ->
+                               level3
+                       end
                end,
     NewState = _NewState,
     {ok, NewState, #data{server_pid = KeyServer, caps_lock_enabled = IsCapsLockEnabled,
-        id = Id, ip_address = IpAddress, port = Port}}.
+        id = Id, ip_address = IpAddress, port = Port, device = Device}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -185,7 +192,7 @@ state_name(_EventType, _EventContent, State) ->
 %%                   {keep_state_and_data, Actions}
 %% @end
 %%--------------------------------------------------------------------
-handle_event(enter, _OldState, test, #data{server_pid = SrvPid} = Data) ->
+handle_event(enter, _OldState, test, #data{server_pid = _SrvPid} = Data) ->
     lager:info("~s enter", [log_prefix(Data, test)]),
   %sp_keyboard:debug(),
   %sp_keyboard:send_keys(SrvPid, [file, calculator, browser, email, eject, none, alt_f4, none]),
@@ -320,7 +327,16 @@ handle_event(info, {timeout, _, level2_success_timeout}, level2, #data{server_pi
     cancel_timer(Data#data.level2_key_timer),
     sp_keyboard:send_keys(SrvPid, ["\n\necho CONGRATULATIONS\n", none]),
     sp_keyboard:send_keys(SrvPid, ["echo You have passed the 2-factor authentication system\n", none]),
-    {next_state, level3, Data};
+    case application:get_env(sp, two_entries, false) of
+        false ->
+            {next_state, level3, Data};
+        true ->
+            DeviceName = application:get_env(sp, second_device, <<"vip-access">>),
+            Text = binary_to_list(iolist_to_binary(io_lib:format("echo To continue, connect to the ~s device instead of 8-tuenti\n", [DeviceName]))),
+            sp_keyboard:send_keys(SrvPid, [Text, none]),
+            sp_keyboard:wait_for_empty_buffer(SrvPid),
+            {stop, normal}
+    end;
 handle_event(info, {timeout, _, level2_timeout}, level2, #data{server_pid = SrvPid} = Data) ->
     lager:info("~s failed with \"~s\"", [log_prefix(Data, level2), Data#data.level2_buffer]),
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
@@ -331,9 +347,14 @@ handle_event(info, {timeout, _, level2_timeout}, level2, #data{server_pid = SrvP
 
 %% LEVEL 3
 handle_event(enter, _OldState, level3, #data{server_pid = SrvPid} = Data) ->
-    lager:info("~s enter", [log_prefix(Data, level3)]),
+    case application:get_env(sp, two_entries, false) of
+        true ->
+            lager:info("~s enter VIP-access", [log_prefix(Data, level3)]);
+        _ ->
+            lager:info("~s enter", [log_prefix(Data, level3)])
+    end,
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
-    sp_keyboard:send_keys(SrvPid, ["\n\necho Are you there\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["\n\necho Is someone there\n", none]),
     sp_keyboard:send_keys(SrvPid, ["echo To say YES activate CAPS LOCK\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     sp_keyboard:send_caps_lock_messages(SrvPid, true),

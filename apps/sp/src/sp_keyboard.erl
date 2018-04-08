@@ -107,6 +107,7 @@
                 socket :: gen_tcp:socket(),
                 pending_data = <<>> :: binary(),
                 step :: undefined | imported,
+                device :: first | second,
                 submit_sequence = undefined :: non_neg_integer() | undefined,
                 timer_for_set = undefined :: reference() | undefined,
                 pending_keys :: pqueue2:pqueue2(),
@@ -312,7 +313,7 @@ handle_info(waiting_for_set_configuration_timeout, #state{timer_for_set = undefi
 handle_info(waiting_for_set_configuration_timeout, State) ->
     lager:debug("## READY (TIMEOUT)"),
     NewState = check_and_send_key(State),
-    {ok, FsmPid} = sp_fsm:start_link(self(), State#state.caps_lock_enabled, State#state.id, State#state.ip_address, State#state.port),
+    {ok, FsmPid} = sp_fsm:start_link(State#state.device, self(), State#state.caps_lock_enabled, State#state.id, State#state.ip_address, State#state.port),
     lager:info("~s Started FSM by TIMEOUT~p", [log_prefix(State), FsmPid]),
     MRef = erlang:monitor(process, FsmPid),
     {noreply, NewState#state{timer_for_set = undefined, fsm_pid = FsmPid, monitor_fsm = MRef}};
@@ -390,38 +391,49 @@ handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_DEVLIST:16/big, _Status:32
   gen_tcp:send(Socket, Resp),
   close;
 handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_IMPORT:16/big, _Status:32/big, BusId:32/binary, RestBinary/binary>>, Socket, #state{step = undefined} = State) ->
-  PaddedBusId = iolist_to_binary(bin_zero_pad(?DEVICE_BUSID, 32)),
-  case PaddedBusId == BusId of
-    false ->
+  FirstDeviceId = iolist_to_binary(bin_zero_pad(?DEVICE_BUSID, 32)),
+  SecondDeviceId = iolist_to_binary(bin_zero_pad(application:get_env(sp, second_device, <<"vip-access">>), 32)),
+
+  TwoDevicesEnabled = application:get_env(sp, two_entries, false),
+
+  case BusId of
+      Bus when Bus == FirstDeviceId orelse (Bus == SecondDeviceId andalso TwoDevicesEnabled) ->
+          RespOk = [
+              <<?USBIP_VERSION:16/big>>,
+              <<?USBIP_OP_REP_IMPORT:16/big>>,
+              <<0:32/big>>,   % 0 = Status ok,
+              bin_zero_pad(?DEVICE_SYSTEM_PATH, 256),
+              BusId,
+              <<?DEVICE_BUS_NUMBER:32/big>>,
+              <<?DEVICE_NUMBER:32/big>>,
+              <<?DEVICE_CONNECTED_SPEED:32/big>>,
+              <<?DEVICE_ID_VENDOR:16/big>>,
+              <<?DEVICE_ID_PRODUCT:16/big>>,
+              <<?DEVICE_BCD_DEVICE:16/big>>,
+              ?DEVICE_BDEVICE_CLASS,
+              ?DEVICE_BDEVICE_SUB_CLASS,
+              ?DEVICE_BDEVICE_PROTOCOL,
+              ?DEVICE_BCONFIGURATION_VALUE,
+              ?DEVICE_BNUM_CONFIGURATIONS,
+              ?DEVICE_BNUM_INTERFACES],
+          gen_tcp:send(Socket, RespOk),
+          erlang:cancel_timer(State#state.inactivity_timer),
+          NewInactivityTimer = erlang:send_after(?INACTIVITY_TIMEOUT_IMPORTED * 1000, self(), inactivity_timeout),
+
+          AtomDeviceId = case {TwoDevicesEnabled, Bus} of
+                             {false, _} -> first;
+                             {true, FirstDeviceId} -> first;
+                             {true, SecondDeviceId} -> second
+                         end,
+
+          handle_command(RestBinary, Socket, State#state{device = AtomDeviceId, step = imported, pending_data = RestBinary, inactivity_timer = NewInactivityTimer});
+    _ ->
       RespError = [
         <<?USBIP_VERSION:16/big>>,
         <<?USBIP_OP_REP_IMPORT:16/big>>,
         <<1:32/big>>],  % 1 = Error Status
       gen_tcp:send(Socket, RespError),
-      close;
-    true ->
-      RespOk = [
-        <<?USBIP_VERSION:16/big>>,
-        <<?USBIP_OP_REP_IMPORT:16/big>>,
-        <<0:32/big>>,   % 0 = Status ok,
-        bin_zero_pad(?DEVICE_SYSTEM_PATH, 256),
-        PaddedBusId,
-        <<?DEVICE_BUS_NUMBER:32/big>>,
-        <<?DEVICE_NUMBER:32/big>>,
-        <<?DEVICE_CONNECTED_SPEED:32/big>>,
-        <<?DEVICE_ID_VENDOR:16/big>>,
-        <<?DEVICE_ID_PRODUCT:16/big>>,
-        <<?DEVICE_BCD_DEVICE:16/big>>,
-        ?DEVICE_BDEVICE_CLASS,
-        ?DEVICE_BDEVICE_SUB_CLASS,
-        ?DEVICE_BDEVICE_PROTOCOL,
-        ?DEVICE_BCONFIGURATION_VALUE,
-        ?DEVICE_BNUM_CONFIGURATIONS,
-        ?DEVICE_BNUM_INTERFACES],
-      gen_tcp:send(Socket, RespOk),
-      erlang:cancel_timer(State#state.inactivity_timer),
-      NewInactivityTimer = erlang:send_after(?INACTIVITY_TIMEOUT_IMPORTED * 1000, self(), inactivity_timeout),
-      handle_command(RestBinary, Socket, State#state{step = imported, pending_data = RestBinary, inactivity_timer = NewInactivityTimer})
+      close
   end;
 handle_command(<<?USBIP_OP_CMD_SUBMIT:32/big, RestBinary/binary>>, Socket, #state{step = imported} = State) ->
   handle_cmd_submit(RestBinary, Socket, State);
@@ -793,7 +805,7 @@ handle_urb(set, <<16#21,    % Host to device
                   % We were waiting for this SET REPORT to be ready, we can start sending keys
                   lager:debug("## READY (SET REPORT)~n"),
                   erlang:cancel_timer(TimerRef),
-                  {ok, FsmPid} = sp_fsm:start_link(self(), IsCapsLockEnabled, State#state.id, State#state.ip_address, State#state.port),
+                  {ok, FsmPid} = sp_fsm:start_link(State#state.device, self(), IsCapsLockEnabled, State#state.id, State#state.ip_address, State#state.port),
                   lager:info("~s Started FSM by SET REPORT ~p", [log_prefix(State), FsmPid]),
                   MRef = erlang:monitor(process, FsmPid),
                   check_and_send_key(State2#state{timer_for_set = undefined, fsm_pid = FsmPid, monitor_fsm = MRef})
