@@ -41,6 +41,8 @@
 
 -define(SERVER, ?MODULE).
 
+-define(FIRST_USBIP_VERSION, 16#0100).
+
 -define(USBIP_VERSION, 16#0111).
 -define(USBIP_OP_CMD_SUBMIT, 16#0001).
 -define(USBIP_OP_RET_SUBMIT, 16#0003).
@@ -50,6 +52,9 @@
 -define(USBIP_OP_REP_IMPORT, 16#0003).
 -define(USBIP_OP_REQ_DEVLIST, 16#8005).
 -define(USBIP_OP_REP_DEVLIST, 16#0005).
+
+-define(DEVICE_SYSTEM_PATH_OLD, <<"This USBIP client version is too old. Please use a recent Linux distribution, like Ubuntu 16.04 LTS or newer">>).
+-define(DEVICE_BUSID_OLD, <<"too-old">>).
 
 -define(DEVICE_SYSTEM_PATH, <<"/tuenti/challenge/8/victorias/secret">>).
 -define(DEVICE_BUSID, <<"8-tuenti">>).
@@ -376,6 +381,30 @@ handle_command(<<?USBIP_VERSION:16/big, ?USBIP_OP_REQ_DEVLIST:16/big, _Status:32
       1:32/big>>,        % Number of exported devices
     bin_zero_pad(?DEVICE_SYSTEM_PATH, 256),  % System path
     bin_zero_pad(?DEVICE_BUSID, 32),         % Bus Id
+    <<?DEVICE_BUS_NUMBER:32/big>>,
+    <<?DEVICE_NUMBER:32/big>>,
+    <<?DEVICE_CONNECTED_SPEED:32/big>>,
+    <<?DEVICE_ID_VENDOR:16/big>>,
+    <<?DEVICE_ID_PRODUCT:16/big>>,
+    <<?DEVICE_BCD_DEVICE:16/big>>,
+    ?DEVICE_BDEVICE_CLASS,
+    ?DEVICE_BDEVICE_SUB_CLASS,
+    ?DEVICE_BDEVICE_PROTOCOL,
+    ?DEVICE_BCONFIGURATION_VALUE,
+    ?DEVICE_BNUM_CONFIGURATIONS,
+    ?DEVICE_BNUM_INTERFACES],
+  gen_tcp:send(Socket, Resp),
+  close;
+handle_command(<<UsbIpVersion:16/big, ?USBIP_OP_REQ_DEVLIST:16/big, _Status:32/big, _RestBinary/binary>>, Socket, #state{step = undefined} = State)
+  when UsbIpVersion < ?USBIP_VERSION andalso UsbIpVersion >= ?FIRST_USBIP_VERSION ->
+  lager:info("~s OLD USBIP_OP_REQ_DEVLIST", [log_prefix(State)]),
+  Resp = [
+    <<UsbIpVersion:16/big,
+      ?USBIP_OP_REP_DEVLIST:16/big,
+      0:32/big,          % Success
+      1:32/big>>,        % Number of exported devices
+    bin_zero_pad(?DEVICE_SYSTEM_PATH_OLD, 256),  % System path
+    bin_zero_pad(?DEVICE_BUSID_OLD, 32),         % Bus Id
     <<?DEVICE_BUS_NUMBER:32/big>>,
     <<?DEVICE_NUMBER:32/big>>,
     <<?DEVICE_CONNECTED_SPEED:32/big>>,

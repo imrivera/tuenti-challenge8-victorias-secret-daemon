@@ -354,7 +354,7 @@ handle_event(enter, _OldState, level3, #data{server_pid = SrvPid} = Data) ->
             lager:info("~s enter", [log_prefix(Data, level3)])
     end,
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
-    sp_keyboard:send_keys(SrvPid, ["\n\necho Is someone there\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["\n\necho Is anybody there\n", none]),
     sp_keyboard:send_keys(SrvPid, ["echo To say YES activate CAPS LOCK\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     sp_keyboard:send_caps_lock_messages(SrvPid, true),
@@ -370,7 +370,7 @@ handle_event(cast, {caps_lock_enabled, true}, level3, #data{server_pid = SrvPid,
     sp_keyboard:send_keys(SrvPid, ["echo You should not be there\n", none]),
     {next_state, mayhem, Data};
 handle_event(info, {timeout, _, level3_half_timeout}, level3, #data{server_pid = SrvPid} = Data) ->
-    sp_keyboard:send_keys(SrvPid, ["\n\necho Nice weather\n\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["\n\necho Nobody\n\n", none]),
     {keep_state, Data#data{level3_half_timer = undefined}};
 handle_event(info, {timeout, _, level3_timeout}, level3, #data{server_pid = SrvPid} = Data) ->
     lager:info("~s completed", [log_prefix(Data, level3)]),
