@@ -53,7 +53,7 @@
 -define(USBIP_OP_REQ_DEVLIST, 16#8005).
 -define(USBIP_OP_REP_DEVLIST, 16#0005).
 
--define(DEVICE_SYSTEM_PATH_OLD, <<"This USBIP client version is too old. Please use a recent Linux distribution, like Ubuntu 16.04 LTS or newer">>).
+-define(DEVICE_SYSTEM_PATH_OLD, <<"This USBIP client version is too old. Please use a recent Linux distribution, like Ubuntu 16.04 LTS or newer and make sure you use the usbip with version (usbip-utils 2.0) that matches your kernel version">>).
 -define(DEVICE_BUSID_OLD, <<"too-old">>).
 
 -define(DEVICE_SYSTEM_PATH, <<"/tuenti/challenge/8/victorias/secret">>).
@@ -62,7 +62,7 @@
 %-define(DEVICE_BUSID, <<"1-14">>).
 -define(DEVICE_BUS_NUMBER, 1).
 -define(DEVICE_NUMBER, 9).
--define(DEVICE_CONNECTED_SPEED, 1). % 1 = Low speed
+-define(DEVICE_CONNECTED_SPEED, 2). % 1 = Low speed, 2 = Full speed
 -define(DEVICE_ID_VENDOR, 16#413C).
 -define(DEVICE_ID_PRODUCT, 16#2003).
 -define(DEVICE_BCD_DEVICE, 16#0306).
