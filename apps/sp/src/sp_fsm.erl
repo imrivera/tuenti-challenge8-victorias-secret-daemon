@@ -385,7 +385,7 @@ handle_event(info, {timeout, _, level3_timeout}, level3, #data{server_pid = SrvP
 handle_event(enter, _OldState, vim, #data{server_pid = SrvPid} = Data) ->
     lager:info("~s enter", [log_prefix(Data, vim)]),
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
-    sp_keyboard:set_caps_lock(SrvPid, off),
+    sp_keyboard:send_keys(SrvPid, ["xset r off\n", none]),
     sp_keyboard:send_keys(SrvPid, ["vi solution-super-secret-password", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     timer:sleep(2000),
@@ -412,6 +412,7 @@ handle_event(enter, _OldState, vim, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
     sp_keyboard:send_keys(SrvPid, [ctrl_s, "\n\n", none]),
+    sp_keyboard:send_keys(SrvPid, ["xset r on\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     lager:info("~s completed", [log_prefix(Data, vim)]),
     {stop, normal};
