@@ -161,7 +161,8 @@ set_caps_lock(SrvRef, Value) ->
     gen_server:call(SrvRef, {set_caps_lock, Value}).
 
 wait_for_empty_buffer(SrvRef) ->
-    gen_server:call(SrvRef, wait_for_empty_buffer, 30000).
+    WaitForEmptyBufferSeconds = application:get_env(sp, wait_for_empty_buffer_seconds, 90),
+    gen_server:call(SrvRef, wait_for_empty_buffer, WaitForEmptyBufferSeconds * 1000).
 
 send_caps_lock_messages(SrvRef, SendEnabled) ->
     gen_server:call(SrvRef, {send_caps_lock_messages, SendEnabled}).

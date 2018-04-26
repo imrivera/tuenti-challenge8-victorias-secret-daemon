@@ -32,19 +32,19 @@
 -define(FIRST_CONTACT_TIMEOUT_SECONDS, 15).
 -define(FIRST_CONTACT_AFTER_BYE_SECONDS, 3).
 
--define(LEVEL1_TIMEOUT_SECONDS, 20).
+-define(LEVEL1_TIMEOUT_SECONDS, application:get_env(sp, level1_timeout_seconds, 40)).
 -define(LEVEL1_AFTER_BYE_SECONDS, 1).
 -define(LEVEL1_SUCCESS_TIMEOUT_SECONDS, 2).
 -define(LEVEL1_TIMES, 8).
 
--define(LEVEL2_TIMEOUT_SECONDS, 40).
+-define(LEVEL2_TIMEOUT_SECONDS, application:get_env(sp, level2_timeout_seconds, 100)).
 -define(LEVEL2_MORSE_CODE, <<"-..-.-.-..---..">>).
 %-define(LEVEL2_MORSE_CODE, <<"-.">>).
 -define(LEVEL2_SUCCESS_TIMEOUT_SECONDS, 3).
--define(LEVEL2_DASH_TIME, 1000).
+-define(LEVEL2_DASH_TIME, application:get_env(sp, level2_dash_time_ms, 2000)).
 -define(LEVEL2_AFTER_BYE_SECONDS, 1).
 
--define(LEVEL3_TIMEOUT_SECONDS, 30).
+-define(LEVEL3_TIMEOUT_SECONDS, application:get_env(sp, level3_timeout_seconds, 30)).
 
 -define(MAYHEM_TIMEOUT_SECONDS, 30).
 
@@ -222,6 +222,7 @@ handle_event(enter, _OldState, level1, #data{server_pid = SrvPid} = Data) ->
     lager:info("~s enter", [log_prefix(Data, level1)]),
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_NORMAL),
     sp_keyboard:send_keys(SrvPid, ["echo Starting the 2-factor authentication challenge\n", none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
     sp_keyboard:send_keys(SrvPid, ["echo Lets check if you are able to follow simple hidden instructions in the next lines. Wait for Go to start\n", none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     sp_keyboard:set_keys_per_second(SrvPid, ?SPEED_HIGH),
@@ -293,6 +294,9 @@ handle_event(enter, _Oldstate, level2, #data{server_pid = SrvPid} = Data) ->
     sp_keyboard:send_keys(SrvPid, ["echo Write TUENTI8 in Morse using CAPS LOCK, no errors allowed. I will let you know what I am detecting with - and o characters\n", none]),
     TimeText = binary_to_list(iolist_to_binary(io_lib:format("echo You have ~p seconds to do it\n", [?LEVEL2_TIMEOUT_SECONDS]))),
     sp_keyboard:send_keys(SrvPid, [TimeText, none]),
+    sp_keyboard:wait_for_empty_buffer(SrvPid),
+    DashText = binary_to_list(iolist_to_binary(io_lib:format("echo A dash should be at least ~p milliseconds long\n", [?LEVEL2_DASH_TIME]))),
+    sp_keyboard:send_keys(SrvPid, [DashText, none]),
     sp_keyboard:wait_for_empty_buffer(SrvPid),
     TimeoutTimer = erlang:start_timer(?LEVEL2_TIMEOUT_SECONDS * 1000, self(), level2_timeout),
     sp_keyboard:send_caps_lock_messages(SrvPid, true),
@@ -366,7 +370,7 @@ handle_event(cast, {caps_lock_enabled, true}, level3, #data{server_pid = SrvPid,
     erlang:cancel_timer(Level3HalfTimer),
     erlang:cancel_timer(Level3Timer),
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
-    sp_keyboard:set_caps_lock(SrvPid, off),
+    %sp_keyboard:set_caps_lock(SrvPid, off),
     sp_keyboard:send_keys(SrvPid, ["echo You should not be there\n", none]),
     {next_state, mayhem, Data};
 handle_event(info, {timeout, _, level3_half_timeout}, level3, #data{server_pid = SrvPid} = Data) ->
