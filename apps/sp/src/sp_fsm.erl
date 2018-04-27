@@ -250,7 +250,7 @@ handle_event(cast, {caps_lock_enabled, true}, level1, #data{level1_counter = Cou
     case NewCounter == ?LEVEL1_TIMES orelse NewCounter == (?LEVEL1_TIMES * 2) of
         true ->
             % We achieved the correct number of times
-            RestTime = case erlang:cancel_timer(Level1Timer) of
+            RestTime = case cancel_timer(Level1Timer) of
                            Time when is_integer(Time) ->
                                Time;
                            _ ->
@@ -266,7 +266,7 @@ handle_event(cast, {caps_lock_enabled, true}, level1, #data{level1_counter = Cou
     end;
 handle_event(info, {timeout, _, level1_success_timeout}, level1, #data{server_pid = SrvPid, level1_timer = Level1Timer} = Data) ->
     lager:info("~s completed", [log_prefix(Data, level1)]),
-    erlang:cancel_timer(Level1Timer),
+    cancel_timer(Level1Timer),
     receive
         {timeout, _, level1_timeout} -> ok
     after 0 ->
@@ -367,8 +367,8 @@ handle_event(enter, _OldState, level3, #data{server_pid = SrvPid} = Data) ->
     {keep_state, Data#data{level3_timer = Level3Timer, level3_half_timer = Level3HalfTimer}};
 handle_event(cast, {caps_lock_enabled, true}, level3, #data{server_pid = SrvPid, level3_timer = Level3Timer, level3_half_timer = Level3HalfTimer} = Data) ->
     lager:info("~s failed", [log_prefix(Data, level3)]),
-    erlang:cancel_timer(Level3HalfTimer),
-    erlang:cancel_timer(Level3Timer),
+    cancel_timer(Level3HalfTimer),
+    cancel_timer(Level3Timer),
     sp_keyboard:send_caps_lock_messages(SrvPid, false),
     %sp_keyboard:set_caps_lock(SrvPid, off),
     sp_keyboard:send_keys(SrvPid, ["echo You should not be there\n", none]),
@@ -501,7 +501,12 @@ callback_mode() ->
 cancel_timer(undefined) ->
     0;
 cancel_timer(Ref) ->
-    erlang:cancel_timer(Ref).
+    case catch erlang:cancel_timer(Ref) of
+        N when is_integer(N) ->
+            N;
+        _ ->
+            0
+    end.
 
 generate_random_keys(Ets, Count) ->
     EtsSize = ets:info(Ets, size),
